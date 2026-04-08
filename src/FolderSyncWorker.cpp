@@ -160,32 +160,29 @@ bool ensureDirectoryExists(const QString &directoryPath, QString *errorMessage)
 
 bool removeFileAtPath(const QString &filePath, QString *errorMessage)
 {
-    // QFile file(filePath);
-    // if (!file.exists()) {
-    //     return true;
-    // }
+    QFile file(filePath);
+    if (!file.exists()) {
+        return true;
+    }
 
-    // // file.setPermissions(file.permissions() | QFileDevice::WriteOwner);
-    // if (file.remove()) {
-    //     return true;
-    // }
+    file.setPermissions(file.permissions() | QFileDevice::WriteOwner);
+    if (file.remove()) {
+        return true;
+    }
 
-    // if (errorMessage != nullptr) {
-    //     *errorMessage = QObject::tr("删除文件失败，path=%1，error=%2").arg(filePath, file.errorString());
-    // }
+    if (errorMessage != nullptr) {
+        *errorMessage = QObject::tr("删除文件失败，path=%1，error=%2").arg(filePath, file.errorString());
+    }
 
-    // return false;
-
-
-        try {
-            std::filesystem::path fsPath(filePath.toStdString());
-            return std::filesystem::remove_all(fsPath);
-        } catch (const std::exception &e) {
-            qWarning() << "Error removing path:" << e.what();
-            *errorMessage = QObject::tr("删除文件失败，path=%1，error=%2").arg(filePath, e.what());
-            return false;
-        }
-
+    return false;
+        // try {
+        //     std::filesystem::path fsPath(filePath.toStdString());
+        //     return std::filesystem::remove_all(fsPath);
+        // } catch (const std::exception &e) {
+        //     qWarning() << "Error removing path:" << e.what();
+        //     *errorMessage = QObject::tr("删除文件失败，path=%1，error=%2").arg(filePath, e.what());
+        //     return false;
+        // }
 }
 
 bool removeDirectoryAtPath(const QString &directoryPath, QString *errorMessage)
@@ -224,32 +221,32 @@ bool copyFileWithMetadata(const QString &sourcePath, const QString &targetPath, 
         return false;
     }
 
-    // const QFileInfo sourceInfo(sourcePath);
-    // QFile targetFile(targetPath);
-    // if (!targetFile.setPermissions(sourceInfo.permissions())) {
-    //     if (errorMessage != nullptr) {
-    //         *errorMessage = QObject::tr("复制成功但设置权限失败，target=%1").arg(targetPath);
-    //     }
-    //     return false;
-    // }
+    const QFileInfo sourceInfo(sourcePath);
+    QFile targetFile(targetPath);
+    if (!targetFile.setPermissions(sourceInfo.permissions())) {
+        if (errorMessage != nullptr) {
+            *errorMessage = QObject::tr("复制成功但设置权限失败，target=%1").arg(targetPath);
+        }
+        return false;
+    }
 
-    // if (!targetFile.open(QIODevice::ReadWrite)) {
-    //     if (errorMessage != nullptr) {
-    //         *errorMessage = QObject::tr("复制成功但无法打开目标文件设置时间，target=%1，error=%2")
-    //                             .arg(targetPath, targetFile.errorString());
-    //     }
-    //     return false;
-    // }
+    if (!targetFile.open(QIODevice::ReadWrite)) {
+        if (errorMessage != nullptr) {
+            *errorMessage = QObject::tr("复制成功但无法打开目标文件设置时间，target=%1，error=%2")
+                                .arg(targetPath, targetFile.errorString());
+        }
+        return false;
+    }
 
-    // const bool fileTimeUpdated =
-    //     targetFile.setFileTime(sourceInfo.lastModified(), QFileDevice::FileModificationTime);
-    // targetFile.close();
-    // if (!fileTimeUpdated) {
-    //     if (errorMessage != nullptr) {
-    //         *errorMessage = QObject::tr("复制成功但设置修改时间失败，target=%1").arg(targetPath);
-    //     }
-    //     return false;
-    // }
+    const bool fileTimeUpdated =
+        targetFile.setFileTime(sourceInfo.lastModified(), QFileDevice::FileModificationTime);
+    targetFile.close();
+    if (!fileTimeUpdated) {
+        if (errorMessage != nullptr) {
+            *errorMessage = QObject::tr("复制成功但设置修改时间失败，target=%1").arg(targetPath);
+        }
+        return false;
+    }
 
     return true;
 }
