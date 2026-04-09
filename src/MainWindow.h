@@ -1,15 +1,16 @@
 #pragma once
 
+#include <QHash>
 #include <QMainWindow>
-#include <QSet>
 #include <QVector>
 
 class FolderSyncWorker;
 class FolderWatcher;
 class QStandardItemModel;
-class QThread;
 class QTimer;
 class QWidget;
+class QEvent;
+class QThread;
 
 namespace Ui
 {
@@ -38,14 +39,8 @@ public:
      */
     ~MainWindow() override;
 
-signals:
-    /**
-     * @brief 发送后台同步请求。
-     * @param sourcePath A 主目录绝对路径。
-     * @param targetPath B 备份目录绝对路径。
-     * @param reason 触发同步的原因。
-     */
-    void sigStartSync(const QString &sourcePath, const QString &targetPath, const QString &reason);
+protected:
+    void changeEvent(QEvent *event) override;
 
 private slots:
     void slotAddPair();
@@ -57,14 +52,6 @@ private slots:
     void slotWatcherChanged(const QString &changedPath);
     void slotDebounceTimeout();
     void slotPeriodicCheck();
-    void slotSyncStarted(int totalSteps,
-                         int removeFileCount,
-                         int addFileCount,
-                         int updateFileCount,
-                         const QString &reason);
-    void slotSyncProgress(int currentStep, int totalSteps, const QString &currentItem);
-    void slotSyncFinished(bool success, const QString &summary);
-    void slotAppendLog(const QString &message);
 
 private:
     struct FolderPairConfig
@@ -77,23 +64,40 @@ private:
         int progressMaximum = 1;
     };
 
+    struct RunningSyncContext
+    {
+        QThread *thread = nullptr;
+        int currentStep = 0;
+        int totalSteps = 1;
+        QString reason;
+    };
+
     void buildUi();
-    void initializeWorker();
     void loadSettings();
     void saveSettings() const;
+    void applyButtonStyles();
     void refreshPairTable();
     void refreshActionWidgets();
     void refreshWatcher();
     void updateControlState();
     void appendLog(const QString &message);
+    void removePairIndexFromQueues(int pairIndex);
     void refreshStatusCell(int pairIndex);
     void updatePairStatus(int pairIndex, const QString &statusText);
     void updatePairProgress(int pairIndex, int progressValue, int progressMaximum);
     void requestSyncAll(const QString &reason);
     void requestSyncByIndexes(const QVector<int> &pairIndexes, const QString &reason);
-    void startNextPairSync();
-    void finishCurrentBatch();
-    QVector<int> buildAllPairIndexes() const;
+    void startPairSync(int pairIndex, const QString &reason);
+    void handlePairSyncStarted(int pairIndex,
+                               int totalSteps,
+                               int removeFileCount,
+                               int addFileCount,
+                               int updateFileCount,
+                               const QString &reason);
+    void handlePairSyncProgress(int pairIndex, int currentStep, int totalSteps, const QString &currentItem);
+    void handlePairSyncFinished(int pairIndex, bool success, const QString &summary);
+    bool isPairSyncRunning(int pairIndex) const;
+    int runningSyncCount() const;
     QVector<int> buildEnabledPairIndexes() const;
     QVector<int> normalizePairIndexes(const QVector<int> &pairIndexes) const;
     int currentSelectedPairIndex() const;
@@ -105,7 +109,6 @@ private:
     QWidget *createActionWidget(int pairIndex);
     QString buildPairStateText(const FolderPairConfig &pairConfig) const;
     QString buildPairDisplayText(const FolderPairConfig &pairConfig, int pairIndex) const;
-    QString buildBatchSummary() const;
     QString normalizePath(const QString &path) const;
     bool editPairConfig(FolderPairConfig *pairConfig, int ignoredIndex, const QString &windowTitle) const;
     bool validatePairConfig(const FolderPairConfig &pairConfig,
@@ -117,20 +120,10 @@ private:
     QStandardItemModel *_pairTableModel;
     QTimer *_debounceTimer;
     QTimer *_periodicCheckTimer;
-    QThread *_workerThread;
-    FolderSyncWorker *_folderSyncWorker;
     FolderWatcher *_folderWatcher;
     QVector<FolderPairConfig> _folderPairConfigs;
-    QVector<int> _syncQueue;
-    QSet<int> _pendingSyncPairIndexes;
+    QHash<int, RunningSyncContext> _runningSyncContexts;
+    QHash<int, QString> _pendingSyncReasons;
     bool _isMonitoring;
-    bool _isSyncRunning;
-    bool _hasPendingSync;
-    int _currentSyncPairIndex;
-    int _currentBatchTotalPairs;
-    int _currentBatchFinishedPairs;
-    int _currentBatchFailedPairs;
     QString _scheduledReason;
-    QString _currentBatchReason;
-    QString _pendingReason;
 };

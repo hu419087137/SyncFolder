@@ -120,42 +120,6 @@
      </layout>
     </item>
     <item>
-     <widget class="QGroupBox" name="progressGroupBox">
-      <property name="title">
-       <string>同步进度</string>
-      </property>
-      <layout class="QVBoxLayout" name="progressLayout">
-       <item>
-        <widget class="QLabel" name="statusLabel">
-         <property name="text">
-          <string>状态：空闲</string>
-         </property>
-        </widget>
-       </item>
-       <item>
-        <widget class="QLabel" name="detailLabel">
-         <property name="text">
-          <string>请先新增至少一组同步对。</string>
-         </property>
-         <property name="wordWrap">
-          <bool>true</bool>
-         </property>
-        </widget>
-       </item>
-       <item>
-        <widget class="QProgressBar" name="progressBar">
-         <property name="value">
-          <number>0</number>
-         </property>
-         <property name="format">
-          <string>待同步</string>
-         </property>
-        </widget>
-       </item>
-      </layout>
-     </widget>
-    </item>
-    <item>
      <widget class="QGroupBox" name="logGroupBox">
       <property name="title">
        <string>运行日志</string>

@@ -6,10 +6,10 @@
 class QFileSystemWatcher;
 
 /**
- * @brief FolderWatcher 负责递归监控多组目录树变化。
+ * @brief FolderWatcher 负责轻量监控多组目录变化。
  *
- * QFileSystemWatcher 不会自动把新建子目录加入监听列表，所以这里封装一层，
- * 每次目录变化后都会重新刷新监听集合，确保后续变化也能继续被发现。
+ * 为了避免大目录树一次性注册过多监听句柄，这里只监听每个主目录本身及其父目录。
+ * 深层文件变化最终仍会通过主窗口中的周期校验被发现并补同步。
  */
 class FolderWatcher : public QObject
 {
@@ -23,7 +23,7 @@ public:
     explicit FolderWatcher(QObject *parent = nullptr);
 
     /**
-     * @brief 递归监控多组主目录和备份目录。
+     * @brief 监控多组主目录及其父目录。
      * @param folderPaths 需要纳入监控的目录绝对路径列表。
      */
     void setWatchedFolders(const QStringList &folderPaths);
@@ -45,7 +45,6 @@ private slots:
 
 private:
     void rebuildWatches();
-    QStringList collectDirectoryPaths(const QString &rootPath) const;
 
     QFileSystemWatcher *_fileSystemWatcher;
     QStringList _folderPaths;

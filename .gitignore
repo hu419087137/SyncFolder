@@ -1,0 +1,7 @@
+.qtcreator/
+build/
+build-*/
+buildlog.txt
+buildlog_main.txt
+gcc_err.txt
+gcc_out.txt

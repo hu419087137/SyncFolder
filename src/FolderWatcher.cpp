@@ -1,10 +1,10 @@
 #include "FolderWatcher.h"
 
 #include <QDir>
-#include <QDirIterator>
 #include <QFileInfo>
 #include <QFileSystemWatcher>
 #include <QSet>
+#include <QSignalBlocker>
 #include <QTimer>
 
 namespace
@@ -50,6 +50,7 @@ void FolderWatcher::setWatchedFolders(const QStringList &folderPaths)
 
 void FolderWatcher::clear()
 {
+    const QSignalBlocker blocker(_fileSystemWatcher);
     const QStringList watchedDirectories = _fileSystemWatcher->directories();
     if (!watchedDirectories.isEmpty()) {
         _fileSystemWatcher->removePaths(watchedDirectories);
@@ -60,7 +61,7 @@ void FolderWatcher::slotDirectoryChanged(const QString &changedPath)
 {
     emit sigFolderChanged(changedPath);
 
-    // 目录树变化后刷新监听集合，保证新建子目录也被纳入监控。
+    // 父目录收到变化后，重新评估一次监听集合，确保新建或重建的主目录能被补监听。
     QTimer::singleShot(150, this, [this]() {
         rebuildWatches();
     });
@@ -68,17 +69,13 @@ void FolderWatcher::slotDirectoryChanged(const QString &changedPath)
 
 void FolderWatcher::rebuildWatches()
 {
+    const QSignalBlocker blocker(_fileSystemWatcher);
     clear();
 
     QSet<QString> watchPaths;
     for (const QString &folderPath : _folderPaths) {
         appendUniquePath(folderPath, &watchPaths);
         appendUniquePath(QFileInfo(folderPath).dir().absolutePath(), &watchPaths);
-
-        const QStringList directoryPaths = collectDirectoryPaths(folderPath);
-        for (const QString &directoryPath : directoryPaths) {
-            appendUniquePath(directoryPath, &watchPaths);
-        }
     }
 
     QStringList existingWatchPaths;
@@ -93,25 +90,4 @@ void FolderWatcher::rebuildWatches()
     if (!existingWatchPaths.isEmpty()) {
         _fileSystemWatcher->addPaths(existingWatchPaths);
     }
-}
-
-QStringList FolderWatcher::collectDirectoryPaths(const QString &rootPath) const
-{
-    QStringList directoryPaths;
-
-    const QFileInfo rootInfo(rootPath);
-    if (!rootInfo.exists() || !rootInfo.isDir()) {
-        return directoryPaths;
-    }
-
-    directoryPaths.append(rootPath);
-    QDirIterator iterator(rootPath,
-                          QDir::Dirs | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System,
-                          QDirIterator::Subdirectories);
-    while (iterator.hasNext()) {
-        iterator.next();
-        directoryPaths.append(iterator.fileInfo().absoluteFilePath());
-    }
-
-    return directoryPaths;
 }

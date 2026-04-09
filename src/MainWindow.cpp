@@ -5,6 +5,7 @@
 #include <QColor>
 #include <QDateTime>
 #include <QDir>
+#include <QEvent>
 #include <QFileInfo>
 #include <QHeaderView>
 #include <QHBoxLayout>
@@ -12,6 +13,7 @@
 #include <QMessageBox>
 #include <QPainter>
 #include <QPushButton>
+#include <QSet>
 #include <QSettings>
 #include <QSignalBlocker>
 #include <QStandardItem>
@@ -44,10 +46,44 @@ constexpr int kStatusColumnWidth = 360;
 constexpr int kActionColumnWidth = 270;
 constexpr int kTableRowHeight = 48;
 
-QString buildActionButtonStyle(const QColor &baseColor)
+enum class ButtonStyleKind
 {
+    E_Primary,
+    E_Success,
+    E_Warning,
+    E_Danger,
+    E_Neutral
+};
+
+bool isDarkPalette(const QPalette &palette);
+
+QColor buildButtonBaseColor(ButtonStyleKind buttonStyleKind, const QPalette &palette)
+{
+    const bool darkTheme = isDarkPalette(palette);
+    switch (buttonStyleKind) {
+    case ButtonStyleKind::E_Primary:
+        return darkTheme ? QColor(76, 132, 255) : QColor(85, 124, 214);
+    case ButtonStyleKind::E_Success:
+        return darkTheme ? QColor(56, 170, 114) : QColor(48, 152, 98);
+    case ButtonStyleKind::E_Warning:
+        return darkTheme ? QColor(218, 132, 69) : QColor(221, 110, 54);
+    case ButtonStyleKind::E_Danger:
+        return darkTheme ? QColor(207, 92, 92) : QColor(202, 77, 77);
+    case ButtonStyleKind::E_Neutral:
+        return darkTheme ? QColor(98, 108, 120) : QColor(116, 122, 132);
+    }
+
+    return darkTheme ? QColor(98, 108, 120) : QColor(116, 122, 132);
+}
+
+QString buildActionButtonStyle(ButtonStyleKind buttonStyleKind, const QPalette &palette)
+{
+    const QColor baseColor = buildButtonBaseColor(buttonStyleKind, palette);
     const QColor hoverColor = baseColor.lighter(108);
     const QColor pressedColor = baseColor.darker(108);
+    const bool darkTheme = isDarkPalette(palette);
+    const QColor disabledBg = darkTheme ? QColor(76, 83, 92) : QColor(184, 193, 203);
+    const QColor disabledFg = darkTheme ? QColor(170, 178, 186) : QColor(221, 227, 234);
     return QStringLiteral(
                "QPushButton {"
                " border: none;"
@@ -64,10 +100,10 @@ QString buildActionButtonStyle(const QColor &baseColor)
                " background-color: %3;"
                "}"
                "QPushButton:disabled {"
-               " color: #dde3ea;"
-               " background-color: #b8c1cb;"
+               " color: %4;"
+               " background-color: %5;"
                "}")
-        .arg(baseColor.name(), hoverColor.name(), pressedColor.name());
+        .arg(baseColor.name(), hoverColor.name(), pressedColor.name(), disabledFg.name(), disabledBg.name());
 }
 
 enum StatusDataRole
@@ -155,11 +191,16 @@ public:
             ? viewOption.palette.color(QPalette::HighlightedText)
             : buildStatusTextColor(text, isSyncEnabled, viewOption.palette);
         const QRect contentRect = option.rect.adjusted(6, 4, -6, -4);
-        const int progressWidth = qMin(130, qMax(96, contentRect.width() / 3));
-        const int progressHeight = 8;
+        const bool shouldShowPercent = progressMaximum > 1 || progressValue > 0;
+        const int progressWidth = qMin(110, qMax(82, contentRect.width() / 4));
+        const int percentWidth = shouldShowPercent ? 42 : 0;
+        const int progressHeight = 10;
         const int progressTop = contentRect.top() + (contentRect.height() - progressHeight) / 2;
         const QRect progressRect(contentRect.left(), progressTop, progressWidth, progressHeight);
-        const QRect textRect = contentRect.adjusted(progressWidth + 8, 0, 0, 0);
+        const QRect percentRect(progressRect.right() + 6, contentRect.top(), percentWidth, contentRect.height());
+        const QRect textRect = contentRect.adjusted(progressWidth + percentWidth + 12, 0, 0, 0);
+        const int percentValue = qBound(0, qRound(progressValue * 100.0 / progressMaximum), 100);
+        const QString percentText = QStringLiteral("%1%").arg(percentValue);
 
         painter->save();
         painter->setRenderHint(QPainter::Antialiasing, true);
@@ -184,6 +225,15 @@ public:
             painter->setPen(Qt::NoPen);
             painter->setBrush(QColor(progressColor.red(), progressColor.green(), progressColor.blue(), 200));
             painter->drawRoundedRect(progressFillRect, 6, 6);
+        }
+
+        if (shouldShowPercent) {
+            QFont percentFont = viewOption.font;
+            percentFont.setPointSizeF(qMax(8.0, percentFont.pointSizeF() - 1.0));
+            painter->setFont(percentFont);
+            painter->setPen(textColor);
+            painter->drawText(percentRect, Qt::AlignVCenter | Qt::AlignLeft, percentText);
+            painter->setFont(viewOption.font);
         }
 
         painter->setPen(textColor);
@@ -244,16 +294,8 @@ MainWindow::MainWindow(QWidget *parent)
       _pairTableModel(nullptr),
       _debounceTimer(nullptr),
       _periodicCheckTimer(nullptr),
-      _workerThread(nullptr),
-      _folderSyncWorker(nullptr),
       _folderWatcher(nullptr),
-      _isMonitoring(false),
-      _isSyncRunning(false),
-      _hasPendingSync(false),
-      _currentSyncPairIndex(-1),
-      _currentBatchTotalPairs(0),
-      _currentBatchFinishedPairs(0),
-      _currentBatchFailedPairs(0)
+      _isMonitoring(false)
 {
     buildUi();
 
@@ -269,7 +311,6 @@ MainWindow::MainWindow(QWidget *parent)
     _folderWatcher = new FolderWatcher(this);
     connect(_folderWatcher, &FolderWatcher::sigFolderChanged, this, &MainWindow::slotWatcherChanged);
 
-    initializeWorker();
     loadSettings();
     updateControlState();
 
@@ -282,12 +323,38 @@ MainWindow::~MainWindow()
 {
     saveSettings();
 
-    if (_workerThread != nullptr && _workerThread->isRunning()) {
-        _workerThread->quit();
-        _workerThread->wait();
+    for (auto it = _runningSyncContexts.begin(); it != _runningSyncContexts.end(); ++it) {
+        if (it.value().thread != nullptr && it.value().thread->isRunning()) {
+            it.value().thread->quit();
+            it.value().thread->wait();
+        }
     }
 
     delete _ui;
+}
+
+void MainWindow::changeEvent(QEvent *event)
+{
+    QMainWindow::changeEvent(event);
+
+    if (event == nullptr) {
+        return;
+    }
+
+    if (event->type() != QEvent::PaletteChange && event->type() != QEvent::ApplicationPaletteChange
+        && event->type() != QEvent::StyleChange) {
+        return;
+    }
+
+    if (_ui == nullptr || _ui->addPairButton == nullptr) {
+        return;
+    }
+
+    applyButtonStyles();
+    if (_ui != nullptr && _ui->pairTableView != nullptr) {
+        refreshActionWidgets();
+        _ui->pairTableView->viewport()->update();
+    }
 }
 
 void MainWindow::slotAddPair()
@@ -303,7 +370,13 @@ void MainWindow::slotRemoveSelectedPair()
         return;
     }
 
+    if (runningSyncCount() > 0) {
+        QMessageBox::information(this, tr("无法删除"), tr("存在正在执行的同步任务时，暂不支持删除同步对。"));
+        return;
+    }
+
     const QString pairText = buildPairDisplayText(_folderPairConfigs.at(pairIndex), pairIndex);
+    removePairIndexFromQueues(pairIndex);
     _folderPairConfigs.removeAt(pairIndex);
     saveSettings();
     refreshPairTable();
@@ -313,9 +386,6 @@ void MainWindow::slotRemoveSelectedPair()
         if (_isMonitoring) {
             appendLog(tr("同步对列表已清空，自动停止监控。"));
             slotStopMonitoring();
-        } else {
-            _ui->statusLabel->setText(tr("状态：空闲"));
-            _ui->detailLabel->setText(tr("请先新增至少一组同步对。"));
         }
         return;
     }
@@ -323,10 +393,6 @@ void MainWindow::slotRemoveSelectedPair()
     selectPairRow(qMin(pairIndex, _folderPairConfigs.size() - 1));
     if (_isMonitoring) {
         refreshWatcher();
-        if (buildEnabledPairIndexes().isEmpty()) {
-            _ui->statusLabel->setText(tr("状态：监控中（无启用项）"));
-            _ui->detailLabel->setText(tr("所有同步对都已暂停，当前不会自动同步。"));
-        }
     }
 
     updateControlState();
@@ -348,36 +414,27 @@ void MainWindow::slotStartMonitoring()
 
     _isMonitoring = true;
     _scheduledReason.clear();
-    _pendingReason.clear();
-    _pendingSyncPairIndexes.clear();
-    _hasPendingSync = false;
-    refreshWatcher();
-    _periodicCheckTimer->start();
-
-    _ui->statusLabel->setText(tr("状态：监控中"));
-    _ui->detailLabel->setText(tr("已启动全部监控，准备执行首次同步。"));
     appendLog(tr("已启动全部监控，后续会持续保持所有已启用的 B 目录与对应 A 目录一致。"));
     updateControlState();
+    QTimer::singleShot(0, this, [this]() {
+        if (!_isMonitoring) {
+            return;
+        }
 
-    requestSyncAll(tr("启动监控后的首次同步"));
+        refreshWatcher();
+        _periodicCheckTimer->start();
+        requestSyncAll(tr("启动监控后的首次同步"));
+    });
 }
 
 void MainWindow::slotStopMonitoring()
 {
     _isMonitoring = false;
     _scheduledReason.clear();
-    _pendingReason.clear();
-    _pendingSyncPairIndexes.clear();
-    _hasPendingSync = false;
     _debounceTimer->stop();
     _periodicCheckTimer->stop();
     if (_folderWatcher != nullptr) {
         _folderWatcher->clear();
-    }
-
-    if (!_isSyncRunning) {
-        _ui->statusLabel->setText(tr("状态：监控已停止"));
-        _ui->detailLabel->setText(tr("持续监控已关闭，可以继续手动同步任意同步对。"));
     }
 
     appendLog(tr("已停止监控。"));
@@ -421,99 +478,9 @@ void MainWindow::slotPeriodicCheck()
     }
 }
 
-void MainWindow::slotSyncStarted(int totalSteps,
-                                 int removeFileCount,
-                                 int addFileCount,
-                                 int updateFileCount,
-                                 const QString &reason)
-{
-    if (_currentSyncPairIndex < 0 || _currentSyncPairIndex >= _folderPairConfigs.size()) {
-        return;
-    }
-
-    const QString pairText = buildPairDisplayText(_folderPairConfigs.at(_currentSyncPairIndex), _currentSyncPairIndex);
-    const QString planPreviewText =
-        tr("待删 %1 / 待增 %2 / 待同步 %3").arg(removeFileCount).arg(addFileCount).arg(updateFileCount);
-
-    updatePairStatus(_currentSyncPairIndex, planPreviewText);
-    updatePairProgress(_currentSyncPairIndex, 0, qMax(1, totalSteps));
-    _ui->progressBar->setRange(0, qMax(1, totalSteps));
-    _ui->progressBar->setValue(0);
-    _ui->progressBar->setFormat(totalSteps == 0 ? tr("无需同步") : tr("%v/%m"));
-    _ui->statusLabel->setText(
-        tr("状态：正在同步第 %1/%2 组").arg(_currentBatchFinishedPairs + 1).arg(_currentBatchTotalPairs));
-    _ui->detailLabel->setText(
-        tr("当前同步对：%1\n触发原因：%2\n备份前检查：待删除文件 %3，待新增文件 %4，待同步文件 %5。")
-            .arg(pairText)
-            .arg(reason)
-            .arg(removeFileCount)
-            .arg(addFileCount)
-            .arg(updateFileCount));
-    appendLog(tr("开始同步：%1，待删除文件 %2，待新增文件 %3，待同步文件 %4。")
-                  .arg(pairText)
-                  .arg(removeFileCount)
-                  .arg(addFileCount)
-                  .arg(updateFileCount));
-}
-
-void MainWindow::slotSyncProgress(int currentStep, int totalSteps, const QString &currentItem)
-{
-    if (_currentSyncPairIndex < 0 || _currentSyncPairIndex >= _folderPairConfigs.size()) {
-        return;
-    }
-
-    const QString pairText = buildPairDisplayText(_folderPairConfigs.at(_currentSyncPairIndex), _currentSyncPairIndex);
-    updatePairProgress(_currentSyncPairIndex, currentStep, totalSteps);
-    _ui->progressBar->setRange(0, qMax(1, totalSteps));
-    _ui->progressBar->setValue(currentStep);
-    _ui->progressBar->setFormat(tr("%v/%m"));
-    _ui->detailLabel->setText(tr("第 %1/%2 组：%3\n%4")
-                                  .arg(_currentBatchFinishedPairs + 1)
-                                  .arg(_currentBatchTotalPairs)
-                                  .arg(pairText)
-                                  .arg(currentItem));
-}
-
-void MainWindow::slotSyncFinished(bool success, const QString &summary)
-{
-    if (_currentSyncPairIndex >= 0 && _currentSyncPairIndex < _folderPairConfigs.size()) {
-        const QString pairText =
-            buildPairDisplayText(_folderPairConfigs.at(_currentSyncPairIndex), _currentSyncPairIndex);
-        const QString statusText =
-            success ? (summary.contains(tr("无需同步")) ? tr("最近一次：已一致") : tr("最近一次：成功"))
-                    : tr("最近一次：失败");
-        updatePairStatus(_currentSyncPairIndex, statusText);
-        updatePairProgress(_currentSyncPairIndex, 0, 1);
-        appendLog(tr("同步对完成：%1，result=%2").arg(pairText, success ? tr("成功") : tr("失败")));
-    }
-
-    ++_currentBatchFinishedPairs;
-    if (!success) {
-        ++_currentBatchFailedPairs;
-    }
-
-    if (!_syncQueue.isEmpty()) {
-        QTimer::singleShot(0, this, [this]() {
-            startNextPairSync();
-        });
-        return;
-    }
-
-    finishCurrentBatch();
-}
-
-void MainWindow::slotAppendLog(const QString &message)
-{
-    appendLog(message);
-}
-
 void MainWindow::buildUi()
 {
     _ui->setupUi(this);
-
-    _ui->progressBar->setRange(0, 1);
-    _ui->progressBar->setValue(0);
-    _ui->progressBar->setFormat(tr("待同步"));
 
     _pairTableModel = new QStandardItemModel(this);
     _pairTableModel->setColumnCount(4);
@@ -541,7 +508,8 @@ void MainWindow::buildUi()
     _ui->pairTableView->setSelectionBehavior(QAbstractItemView::SelectRows);
     _ui->pairTableView->setSelectionMode(QAbstractItemView::SingleSelection);
     _ui->pairTableView->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    _ui->pairTableView->setAlternatingRowColors(true);
+    _ui->pairTableView->setAlternatingRowColors(false);
+    applyButtonStyles();
 
     connect(_ui->addPairButton, &QPushButton::clicked, this, &MainWindow::slotAddPair);
     connect(_ui->removePairButton, &QPushButton::clicked, this, &MainWindow::slotRemoveSelectedPair);
@@ -554,25 +522,24 @@ void MainWindow::buildUi()
     connect(_ui->syncAllPairsButton, &QPushButton::clicked, this, &MainWindow::slotSyncAllPairs);
 }
 
-void MainWindow::initializeWorker()
+void MainWindow::applyButtonStyles()
 {
-    _workerThread = new QThread(this);
-    _folderSyncWorker = new FolderSyncWorker();
-    _folderSyncWorker->moveToThread(_workerThread);
+    if (_ui == nullptr || _ui->addPairButton == nullptr) {
+        return;
+    }
 
-    connect(_workerThread, &QThread::finished, _folderSyncWorker, &QObject::deleteLater);
-    connect(this, &MainWindow::sigStartSync, _folderSyncWorker, &FolderSyncWorker::slotStartSync,
-            Qt::QueuedConnection);
-    connect(_folderSyncWorker, &FolderSyncWorker::sigSyncStarted, this, &MainWindow::slotSyncStarted,
-            Qt::QueuedConnection);
-    connect(_folderSyncWorker, &FolderSyncWorker::sigSyncProgress, this, &MainWindow::slotSyncProgress,
-            Qt::QueuedConnection);
-    connect(_folderSyncWorker, &FolderSyncWorker::sigSyncFinished, this, &MainWindow::slotSyncFinished,
-            Qt::QueuedConnection);
-    connect(_folderSyncWorker, &FolderSyncWorker::sigLogMessage, this, &MainWindow::slotAppendLog,
-            Qt::QueuedConnection);
+    const QPalette palette = this->palette();
+    _ui->addPairButton->setStyleSheet(buildActionButtonStyle(ButtonStyleKind::E_Primary, palette));
+    _ui->removePairButton->setStyleSheet(buildActionButtonStyle(ButtonStyleKind::E_Danger, palette));
+    _ui->startMonitorButton->setStyleSheet(buildActionButtonStyle(ButtonStyleKind::E_Primary, palette));
+    _ui->stopMonitorButton->setStyleSheet(buildActionButtonStyle(ButtonStyleKind::E_Warning, palette));
+    _ui->syncAllPairsButton->setStyleSheet(buildActionButtonStyle(ButtonStyleKind::E_Success, palette));
 
-    _workerThread->start();
+    _ui->addPairButton->setCursor(Qt::PointingHandCursor);
+    _ui->removePairButton->setCursor(Qt::PointingHandCursor);
+    _ui->startMonitorButton->setCursor(Qt::PointingHandCursor);
+    _ui->stopMonitorButton->setCursor(Qt::PointingHandCursor);
+    _ui->syncAllPairsButton->setCursor(Qt::PointingHandCursor);
 }
 
 void MainWindow::loadSettings()
@@ -599,18 +566,12 @@ void MainWindow::loadSettings()
     settings.endArray();
 
     refreshPairTable();
-    if (_folderPairConfigs.isEmpty()) {
-        _ui->statusLabel->setText(tr("状态：空闲"));
-        _ui->detailLabel->setText(tr("请先新增至少一组同步对。"));
-        return;
+    if (!_folderPairConfigs.isEmpty()) {
+        selectPairRow(0);
+        appendLog(tr("已恢复 %1 组历史同步路径，配置文件：%2")
+                      .arg(_folderPairConfigs.size())
+                      .arg(QDir::toNativeSeparators(settingsFilePath())));
     }
-
-    selectPairRow(0);
-    _ui->statusLabel->setText(tr("状态：空闲"));
-    _ui->detailLabel->setText(tr("已恢复 %1 组历史同步路径，可立即开始同步或启动监控。").arg(_folderPairConfigs.size()));
-    appendLog(tr("已恢复 %1 组历史同步路径，配置文件：%2")
-                  .arg(_folderPairConfigs.size())
-                  .arg(QDir::toNativeSeparators(settingsFilePath())));
 }
 
 void MainWindow::saveSettings() const
@@ -715,11 +676,11 @@ void MainWindow::refreshWatcher()
     }
 
     QStringList watchedFolders;
-    watchedFolders.reserve(enabledPairIndexes.size() * 2);
+    watchedFolders.reserve(enabledPairIndexes.size());
     for (int pairIndex : enabledPairIndexes) {
         const FolderPairConfig &pairConfig = _folderPairConfigs.at(pairIndex);
+        // 只监听 A 主目录，避免程序同步 B 时反复触发自身监控。
         watchedFolders.append(pairConfig.sourcePath);
-        watchedFolders.append(pairConfig.targetPath);
     }
 
     _folderWatcher->setWatchedFolders(watchedFolders);
@@ -727,28 +688,40 @@ void MainWindow::refreshWatcher()
 
 void MainWindow::updateControlState()
 {
-    const bool canEdit = !_isSyncRunning;
     const bool hasPairs = !_folderPairConfigs.isEmpty();
     const bool hasSelection = currentSelectedPairIndex() >= 0;
     const bool hasEnabledPairs = !buildEnabledPairIndexes().isEmpty();
+    const bool hasRunningSync = runningSyncCount() > 0;
 
-    _ui->pairTableView->setEnabled(canEdit);
-    _ui->addPairButton->setEnabled(canEdit);
-    _ui->removePairButton->setEnabled(canEdit && hasSelection);
-    _ui->startMonitorButton->setEnabled(!_isMonitoring && !_isSyncRunning && hasEnabledPairs);
+    _ui->pairTableView->setEnabled(hasPairs);
+    _ui->addPairButton->setEnabled(true);
+    _ui->removePairButton->setEnabled(!hasRunningSync && hasSelection);
+    _ui->startMonitorButton->setEnabled(!_isMonitoring && hasEnabledPairs);
     _ui->stopMonitorButton->setEnabled(_isMonitoring);
-    _ui->syncAllPairsButton->setEnabled(!_isSyncRunning && hasEnabledPairs);
-
-    if (!hasPairs && !_isSyncRunning && !_isMonitoring) {
-        _ui->statusLabel->setText(tr("状态：空闲"));
-        _ui->detailLabel->setText(tr("请先新增至少一组同步对。"));
-    }
+    _ui->syncAllPairsButton->setEnabled(hasEnabledPairs);
 }
 
 void MainWindow::appendLog(const QString &message)
 {
     const QString timestamp = QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"));
     _ui->logEdit->appendPlainText(QStringLiteral("[%1] %2").arg(timestamp, message));
+}
+
+void MainWindow::removePairIndexFromQueues(int pairIndex)
+{
+    if (pairIndex < 0) {
+        return;
+    }
+
+    QHash<int, QString> shiftedReasons;
+    for (auto it = _pendingSyncReasons.cbegin(); it != _pendingSyncReasons.cend(); ++it) {
+        if (it.key() == pairIndex) {
+            continue;
+        }
+
+        shiftedReasons.insert(it.key() > pairIndex ? it.key() - 1 : it.key(), it.value());
+    }
+    _pendingSyncReasons = shiftedReasons;
 }
 
 void MainWindow::refreshStatusCell(int pairIndex)
@@ -806,135 +779,184 @@ void MainWindow::requestSyncByIndexes(const QVector<int> &pairIndexes, const QSt
 {
     const QVector<int> normalizedIndexes = normalizePairIndexes(pairIndexes);
     if (normalizedIndexes.isEmpty()) {
-        _ui->progressBar->setRange(0, 1);
-        _ui->progressBar->setValue(0);
-        _ui->progressBar->setFormat(tr("待同步"));
-        if (_isMonitoring) {
-            _ui->statusLabel->setText(tr("状态：监控中（无启用项）"));
-            _ui->detailLabel->setText(tr("当前没有已启用的同步对。"));
-        } else {
-            _ui->statusLabel->setText(tr("状态：空闲"));
-            _ui->detailLabel->setText(tr("当前没有可同步的配置，可通过“恢复同步”重新启用某一行。"));
-        }
-        updateControlState();
         return;
     }
 
-    if (_isSyncRunning) {
-        _hasPendingSync = true;
-        for (int pairIndex : normalizedIndexes) {
-            _pendingSyncPairIndexes.insert(pairIndex);
+    int startedPairCount = 0;
+    int pendingPairCount = 0;
+    for (int pairIndex : normalizedIndexes) {
+        if (isPairSyncRunning(pairIndex)) {
+            _pendingSyncReasons.insert(pairIndex, reason);
+            ++pendingPairCount;
+            continue;
         }
-        _pendingReason = reason;
-        appendLog(tr("当前仍有同步任务在执行，已合并新的请求，reason=%1，count=%2")
-                      .arg(reason)
-                      .arg(normalizedIndexes.size()));
-        return;
+        startPairSync(pairIndex, reason);
+        ++startedPairCount;
     }
 
-    _syncQueue = normalizedIndexes;
-    _currentBatchReason = reason;
-    _currentBatchTotalPairs = _syncQueue.size();
-    _currentBatchFinishedPairs = 0;
-    _currentBatchFailedPairs = 0;
-    _currentSyncPairIndex = -1;
-    _isSyncRunning = true;
-
-    for (int pairIndex : _syncQueue) {
-        updatePairProgress(pairIndex, 0, 1);
-        updatePairStatus(pairIndex, tr("排队中"));
+    if (startedPairCount > 0 || pendingPairCount > 0) {
+        appendLog(tr("已发起并行同步请求：立即启动 %1 组，待当前任务完成后补同步 %2 组，reason=%3")
+                      .arg(startedPairCount)
+                      .arg(pendingPairCount)
+                      .arg(reason));
     }
 
+    refreshActionWidgets();
     updateControlState();
-    _ui->statusLabel->setText(tr("状态：准备同步"));
-    _ui->detailLabel->setText(tr("本轮共 %1 组，触发原因：%2").arg(_currentBatchTotalPairs).arg(reason));
-    _ui->progressBar->setRange(0, 0);
-    _ui->progressBar->setFormat(tr("准备中..."));
-    startNextPairSync();
 }
 
-void MainWindow::startNextPairSync()
+void MainWindow::startPairSync(int pairIndex, const QString &reason)
 {
-    if (_syncQueue.isEmpty()) {
-        finishCurrentBatch();
+    if (pairIndex < 0 || pairIndex >= _folderPairConfigs.size() || isPairSyncRunning(pairIndex)) {
         return;
     }
 
-    _currentSyncPairIndex = _syncQueue.takeFirst();
-    if (_currentSyncPairIndex < 0 || _currentSyncPairIndex >= _folderPairConfigs.size()) {
-        ++_currentBatchFinishedPairs;
-        ++_currentBatchFailedPairs;
-        QTimer::singleShot(0, this, [this]() {
-            startNextPairSync();
-        });
-        return;
-    }
+    const FolderPairConfig &pairConfig = _folderPairConfigs.at(pairIndex);
+    auto *thread = new QThread(this);
+    auto *worker = new FolderSyncWorker();
+    RunningSyncContext syncContext;
+    syncContext.thread = thread;
+    syncContext.currentStep = 0;
+    syncContext.totalSteps = 1;
+    syncContext.reason = reason;
+    _runningSyncContexts.insert(pairIndex, syncContext);
 
-    const FolderPairConfig &pairConfig = _folderPairConfigs.at(_currentSyncPairIndex);
-    updatePairStatus(_currentSyncPairIndex, tr("等待执行"));
-    emit sigStartSync(pairConfig.sourcePath,
-                      pairConfig.targetPath,
-                      tr("%1 | 第 %2/%3 组")
-                          .arg(_currentBatchReason)
-                          .arg(_currentBatchFinishedPairs + 1)
-                          .arg(_currentBatchTotalPairs));
-}
+    worker->moveToThread(thread);
+    connect(thread, &QThread::finished, worker, &QObject::deleteLater);
+    connect(thread, &QThread::finished, thread, &QObject::deleteLater);
+    connect(worker,
+            &FolderSyncWorker::sigSyncStarted,
+            this,
+            [this, pairIndex](int totalSteps,
+                              int removeFileCount,
+                              int addFileCount,
+                              int updateFileCount,
+                              const QString &syncReason) {
+                handlePairSyncStarted(pairIndex,
+                                      totalSteps,
+                                      removeFileCount,
+                                      addFileCount,
+                                      updateFileCount,
+                                      syncReason);
+            },
+            Qt::QueuedConnection);
+    connect(worker,
+            &FolderSyncWorker::sigSyncProgress,
+            this,
+            [this, pairIndex](int currentStep, int totalSteps, const QString &currentItem) {
+                handlePairSyncProgress(pairIndex, currentStep, totalSteps, currentItem);
+            },
+            Qt::QueuedConnection);
+    connect(worker,
+            &FolderSyncWorker::sigSyncFinished,
+            this,
+            [this, pairIndex, thread](bool success, const QString &summary) {
+                handlePairSyncFinished(pairIndex, success, summary);
+                if (thread->isRunning()) {
+                    thread->quit();
+                }
+            },
+            Qt::QueuedConnection);
+    connect(worker,
+            &FolderSyncWorker::sigLogMessage,
+            this,
+            [this, pairIndex](const QString &message) {
+                appendLog(tr("第 %1 组：%2").arg(pairIndex + 1).arg(message));
+            },
+            Qt::QueuedConnection);
 
-void MainWindow::finishCurrentBatch()
-{
-    const bool allSuccess = _currentBatchFailedPairs == 0;
-    const QString batchSummary = buildBatchSummary();
-
-    _isSyncRunning = false;
-    _currentSyncPairIndex = -1;
-    _syncQueue.clear();
-
-    _ui->progressBar->setRange(0, 1);
-    _ui->progressBar->setValue(allSuccess ? 1 : 0);
-    _ui->progressBar->setFormat(allSuccess ? tr("完成") : tr("存在失败"));
-    _ui->statusLabel->setText(allSuccess
-                                  ? (_isMonitoring ? tr("状态：监控中") : tr("状态：同步完成"))
-                                  : (_isMonitoring ? tr("状态：监控中（部分失败）")
-                                                   : tr("状态：同步完成（部分失败）")));
-    _ui->detailLabel->setText(batchSummary);
-    appendLog(batchSummary);
-
-    if (_isMonitoring) {
-        refreshWatcher();
-        if (buildEnabledPairIndexes().isEmpty()) {
-            _ui->statusLabel->setText(tr("状态：监控中（无启用项）"));
-            _ui->detailLabel->setText(tr("所有同步对都已暂停，当前不会自动同步。"));
-        }
-    }
-
+    updatePairProgress(pairIndex, 0, 1);
+    updatePairStatus(pairIndex, tr("准备中"));
+    refreshActionWidgets();
     updateControlState();
 
-    if (_hasPendingSync) {
-        QVector<int> pendingIndexes;
-        pendingIndexes.reserve(_pendingSyncPairIndexes.size());
-        for (int pairIndex : _pendingSyncPairIndexes) {
-            pendingIndexes.append(pairIndex);
-        }
+    thread->start();
+    QMetaObject::invokeMethod(worker,
+                              "slotStartSync",
+                              Qt::QueuedConnection,
+                              Q_ARG(QString, pairConfig.sourcePath),
+                              Q_ARG(QString, pairConfig.targetPath),
+                              Q_ARG(QString, reason));
+}
 
-        const QString pendingReason = _pendingReason.isEmpty() ? tr("补偿同步") : _pendingReason;
-        _hasPendingSync = false;
-        _pendingReason.clear();
-        _pendingSyncPairIndexes.clear();
+void MainWindow::handlePairSyncStarted(int pairIndex,
+                                       int totalSteps,
+                                       int removeFileCount,
+                                       int addFileCount,
+                                       int updateFileCount,
+                                       const QString &reason)
+{
+    if (pairIndex < 0 || pairIndex >= _folderPairConfigs.size()) {
+        return;
+    }
 
-        QTimer::singleShot(200, this, [this, pendingIndexes, pendingReason]() {
-            requestSyncByIndexes(pendingIndexes, pendingReason);
+    RunningSyncContext &syncContext = _runningSyncContexts[pairIndex];
+    syncContext.currentStep = 0;
+    syncContext.totalSteps = qMax(1, totalSteps);
+    syncContext.reason = reason;
+
+    updatePairStatus(pairIndex,
+                     tr("待删 %1 / 待增 %2 / 待同步 %3")
+                         .arg(removeFileCount)
+                         .arg(addFileCount)
+                         .arg(updateFileCount));
+    updatePairProgress(pairIndex, 0, qMax(1, totalSteps));
+    appendLog(tr("开始并行同步：%1，待删除文件 %2，待新增文件 %3，待同步文件 %4。")
+                  .arg(buildPairDisplayText(_folderPairConfigs.at(pairIndex), pairIndex))
+                  .arg(removeFileCount)
+                  .arg(addFileCount)
+                  .arg(updateFileCount));
+}
+
+void MainWindow::handlePairSyncProgress(int pairIndex, int currentStep, int totalSteps, const QString &currentItem)
+{
+    if (pairIndex < 0 || pairIndex >= _folderPairConfigs.size() || !_runningSyncContexts.contains(pairIndex)) {
+        return;
+    }
+
+    RunningSyncContext &syncContext = _runningSyncContexts[pairIndex];
+    syncContext.currentStep = currentStep;
+    syncContext.totalSteps = qMax(1, totalSteps);
+    updatePairProgress(pairIndex, currentStep, totalSteps);
+    updatePairStatus(pairIndex, currentItem);
+}
+
+void MainWindow::handlePairSyncFinished(int pairIndex, bool success, const QString &summary)
+{
+    if (pairIndex < 0 || pairIndex >= _folderPairConfigs.size()) {
+        _runningSyncContexts.remove(pairIndex);
+        return;
+    }
+
+    _runningSyncContexts.remove(pairIndex);
+
+    const QString pairText = buildPairDisplayText(_folderPairConfigs.at(pairIndex), pairIndex);
+    const QString statusText = success
+        ? (summary.contains(tr("无需同步")) ? tr("最近一次：已一致") : tr("最近一次：成功"))
+        : tr("最近一次：失败");
+    updatePairStatus(pairIndex, statusText);
+    updatePairProgress(pairIndex, 0, 1);
+    appendLog(tr("并行同步完成：%1，result=%2").arg(pairText, success ? tr("成功") : tr("失败")));
+
+    refreshActionWidgets();
+    updateControlState();
+
+    if (_pendingSyncReasons.contains(pairIndex)) {
+        const QString pendingReason = _pendingSyncReasons.take(pairIndex);
+        QTimer::singleShot(0, this, [this, pairIndex, pendingReason]() {
+            startPairSync(pairIndex, pendingReason);
         });
     }
 }
 
-QVector<int> MainWindow::buildAllPairIndexes() const
+bool MainWindow::isPairSyncRunning(int pairIndex) const
 {
-    QVector<int> pairIndexes;
-    pairIndexes.reserve(_folderPairConfigs.size());
-    for (int index = 0; index < _folderPairConfigs.size(); ++index) {
-        pairIndexes.append(index);
-    }
-    return pairIndexes;
+    return _runningSyncContexts.contains(pairIndex);
+}
+
+int MainWindow::runningSyncCount() const
+{
+    return _runningSyncContexts.size();
 }
 
 QVector<int> MainWindow::buildEnabledPairIndexes() const
@@ -1019,9 +1041,6 @@ void MainWindow::addPair()
     if (_isMonitoring) {
         refreshWatcher();
         requestSyncByIndexes(QVector<int>{newPairIndex}, tr("监控中新增同步对"));
-    } else {
-        _ui->statusLabel->setText(tr("状态：空闲"));
-        _ui->detailLabel->setText(tr("已新增一组同步对，可继续添加，或直接执行同步。"));
     }
 
     updateControlState();
@@ -1029,7 +1048,11 @@ void MainWindow::addPair()
 
 void MainWindow::editPair(int pairIndex)
 {
-    if (_isSyncRunning || pairIndex < 0 || pairIndex >= _folderPairConfigs.size()) {
+    if (pairIndex < 0 || pairIndex >= _folderPairConfigs.size()) {
+        return;
+    }
+
+    if (isPairSyncRunning(pairIndex)) {
         return;
     }
 
@@ -1058,13 +1081,7 @@ void MainWindow::editPair(int pairIndex)
         refreshWatcher();
         if (updatedConfig.isSyncEnabled) {
             requestSyncByIndexes(QVector<int>{pairIndex}, tr("监控中编辑同步对后重新同步"));
-        } else if (buildEnabledPairIndexes().isEmpty()) {
-            _ui->statusLabel->setText(tr("状态：监控中（无启用项）"));
-            _ui->detailLabel->setText(tr("所有同步对都已暂停，当前不会自动同步。"));
         }
-    } else {
-        _ui->statusLabel->setText(tr("状态：空闲"));
-        _ui->detailLabel->setText(tr("同步对已更新，可直接用行内按钮发起同步。"));
     }
 
     updateControlState();
@@ -1072,7 +1089,11 @@ void MainWindow::editPair(int pairIndex)
 
 void MainWindow::syncPair(int pairIndex)
 {
-    if (_isSyncRunning || pairIndex < 0 || pairIndex >= _folderPairConfigs.size()) {
+    if (pairIndex < 0 || pairIndex >= _folderPairConfigs.size()) {
+        return;
+    }
+
+    if (isPairSyncRunning(pairIndex)) {
         return;
     }
 
@@ -1084,12 +1105,25 @@ void MainWindow::syncPair(int pairIndex)
 
 void MainWindow::togglePairSync(int pairIndex)
 {
-    if (_isSyncRunning || pairIndex < 0 || pairIndex >= _folderPairConfigs.size()) {
+    if (pairIndex < 0 || pairIndex >= _folderPairConfigs.size()) {
+        return;
+    }
+
+    if (isPairSyncRunning(pairIndex)) {
         return;
     }
 
     FolderPairConfig &pairConfig = _folderPairConfigs[pairIndex];
+    const bool hadPendingSync = _pendingSyncReasons.contains(pairIndex);
     pairConfig.isSyncEnabled = !pairConfig.isSyncEnabled;
+    if (!pairConfig.isSyncEnabled) {
+        removePairIndexFromQueues(pairIndex);
+        if (hadPendingSync) {
+            pairConfig.statusText = tr("待同步");
+            pairConfig.progressValue = 0;
+            pairConfig.progressMaximum = 1;
+        }
+    }
     saveSettings();
     updatePairStatus(pairIndex, pairConfig.statusText);
     refreshActionWidgets();
@@ -1102,17 +1136,7 @@ void MainWindow::togglePairSync(int pairIndex)
         refreshWatcher();
         if (pairConfig.isSyncEnabled) {
             requestSyncByIndexes(QVector<int>{pairIndex}, tr("恢复同步后校正"));
-        } else if (buildEnabledPairIndexes().isEmpty()) {
-            _ui->statusLabel->setText(tr("状态：监控中（无启用项）"));
-            _ui->detailLabel->setText(tr("所有同步对都已暂停，当前不会自动同步。"));
-        } else {
-            _ui->statusLabel->setText(tr("状态：监控中"));
-            _ui->detailLabel->setText(tr("已暂停当前同步对的自动同步，其余已启用项仍继续监控。"));
         }
-    } else {
-        _ui->statusLabel->setText(tr("状态：空闲"));
-        _ui->detailLabel->setText(pairConfig.isSyncEnabled ? tr("该同步对已恢复参与“同步全部”和自动监控。")
-                                                           : tr("该同步对已暂停，不再参与“同步全部”和自动监控。"));
     }
 
     updateControlState();
@@ -1126,6 +1150,8 @@ QWidget *MainWindow::createActionWidget(int pairIndex)
     auto *syncButton = new QPushButton(tr("同步"), container);
     auto *toggleButton =
         new QPushButton(_folderPairConfigs.at(pairIndex).isSyncEnabled ? tr("取消同步") : tr("恢复同步"), container);
+    const QPalette palette = container->palette();
+    const bool isCurrentPairRunning = isPairSyncRunning(pairIndex);
 
     layout->setContentsMargins(4, 2, 4, 2);
     layout->setSpacing(6);
@@ -1137,18 +1163,24 @@ QWidget *MainWindow::createActionWidget(int pairIndex)
     editButton->setCursor(Qt::PointingHandCursor);
     syncButton->setCursor(Qt::PointingHandCursor);
     toggleButton->setCursor(Qt::PointingHandCursor);
-    editButton->setStyleSheet(buildActionButtonStyle(QColor(85, 124, 214)));
-    syncButton->setStyleSheet(buildActionButtonStyle(QColor(48, 152, 98)));
+    editButton->setStyleSheet(buildActionButtonStyle(ButtonStyleKind::E_Primary, palette));
+    syncButton->setStyleSheet(buildActionButtonStyle(ButtonStyleKind::E_Success, palette));
     toggleButton->setStyleSheet(buildActionButtonStyle(_folderPairConfigs.at(pairIndex).isSyncEnabled
-                                                           ? QColor(221, 110, 54)
-                                                           : QColor(116, 122, 132)));
+                                                           ? ButtonStyleKind::E_Warning
+                                                           : ButtonStyleKind::E_Neutral,
+                                                       palette));
     editButton->setToolTip(tr("编辑这一组 A/B 路径"));
     syncButton->setToolTip(tr("立即同步这一组路径"));
     toggleButton->setToolTip(_folderPairConfigs.at(pairIndex).isSyncEnabled ? tr("暂停这一组的自动同步和“同步全部”")
                                                                             : tr("恢复这一组的自动同步和“同步全部”"));
-    editButton->setEnabled(!_isSyncRunning);
-    syncButton->setEnabled(!_isSyncRunning);
-    toggleButton->setEnabled(!_isSyncRunning);
+    if (isCurrentPairRunning) {
+        syncButton->setText(tr("同步中"));
+        syncButton->setToolTip(tr("当前这一组正在同步中"));
+    }
+
+    editButton->setEnabled(!isCurrentPairRunning);
+    syncButton->setEnabled(!isCurrentPairRunning);
+    toggleButton->setEnabled(!isCurrentPairRunning);
 
     connect(editButton, &QPushButton::clicked, container, [this, pairIndex]() {
         editPair(pairIndex);
@@ -1176,16 +1208,6 @@ QString MainWindow::buildPairDisplayText(const FolderPairConfig &pairConfig, int
         .arg(pairIndex + 1)
         .arg(QDir::toNativeSeparators(pairConfig.sourcePath))
         .arg(QDir::toNativeSeparators(pairConfig.targetPath));
-}
-
-QString MainWindow::buildBatchSummary() const
-{
-    const int successCount = _currentBatchTotalPairs - _currentBatchFailedPairs;
-    return tr("本轮同步结束，触发原因：%1。共 %2 组：成功 %3，失败 %4。")
-        .arg(_currentBatchReason)
-        .arg(_currentBatchTotalPairs)
-        .arg(successCount)
-        .arg(_currentBatchFailedPairs);
 }
 
 QString MainWindow::normalizePath(const QString &path) const
