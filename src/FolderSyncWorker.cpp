@@ -38,6 +38,15 @@ struct SyncOperation
     QString relativePath;
 };
 
+struct SyncPlanStats
+{
+    int removeFileCount = 0;
+    int addFileCount = 0;
+    int updateFileCount = 0;
+    int removeDirectoryCount = 0;
+    int createDirectoryCount = 0;
+};
+
 QString normalizePath(const QString &path)
 {
     const QString trimmedPath = path.trimmed();
@@ -140,6 +149,20 @@ bool isFileDifferent(const QFileInfo &sourceInfo, const QFileInfo &targetInfo)
     return timestampDeltaMs > kTimestampToleranceMs;
 }
 
+int countFilesUnderDirectory(const QString &directoryPath)
+{
+    int fileCount = 0;
+    QDirIterator iterator(directoryPath,
+                          QDir::Files | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System,
+                          QDirIterator::Subdirectories);
+    while (iterator.hasNext()) {
+        iterator.next();
+        ++fileCount;
+    }
+
+    return fileCount;
+}
+
 bool ensureDirectoryExists(const QString &directoryPath, QString *errorMessage)
 {
     QDir directory(directoryPath);
@@ -165,12 +188,22 @@ bool removeFileAtPath(const QString &filePath, QString *errorMessage)
         return true;
     }
 
-    file.setPermissions(file.permissions() | QFileDevice::WriteOwner);
+    // file.setPermissions(file.permissions() | QFileDevice::WriteOwner);
     if (file.remove()) {
         return true;
     }
+    if (!QFile::setPermissions(filePath, file.permissions() | QFile::WriteUser)) {
+        qWarning() << "Failed to set write permission. Try running the program as administrator/root.";
+        // 或者尝试提权（Windows 上可以请求重新以管理员身份启动）
+    }
 
+    QFileInfo fileInfo(filePath);
+    // auto oldCurrentDirPath = QDir::currentPath();
+    if (fileInfo.dir().remove(fileInfo.fileName())){
+        return true;
+    }
     if (errorMessage != nullptr) {
+        qWarning()<<fileInfo.permissions();
         *errorMessage = QObject::tr("删除文件失败，path=%1，error=%2").arg(filePath, file.errorString());
     }
 
@@ -221,32 +254,32 @@ bool copyFileWithMetadata(const QString &sourcePath, const QString &targetPath, 
         return false;
     }
 
-    const QFileInfo sourceInfo(sourcePath);
-    QFile targetFile(targetPath);
-    if (!targetFile.setPermissions(sourceInfo.permissions())) {
-        if (errorMessage != nullptr) {
-            *errorMessage = QObject::tr("复制成功但设置权限失败，target=%1").arg(targetPath);
-        }
-        return false;
-    }
+    // const QFileInfo sourceInfo(sourcePath);
+    // QFile targetFile(targetPath);
+    // if (!targetFile.setPermissions(sourceInfo.permissions())) {
+    //     if (errorMessage != nullptr) {
+    //         *errorMessage = QObject::tr("复制成功但设置权限失败，target=%1").arg(targetPath);
+    //     }
+    //     return false;
+    // }
 
-    if (!targetFile.open(QIODevice::ReadWrite)) {
-        if (errorMessage != nullptr) {
-            *errorMessage = QObject::tr("复制成功但无法打开目标文件设置时间，target=%1，error=%2")
-                                .arg(targetPath, targetFile.errorString());
-        }
-        return false;
-    }
+    // if (!targetFile.open(QIODevice::ReadWrite)) {
+    //     if (errorMessage != nullptr) {
+    //         *errorMessage = QObject::tr("复制成功但无法打开目标文件设置时间，target=%1，error=%2")
+    //                             .arg(targetPath, targetFile.errorString());
+    //     }
+    //     return false;
+    // }
 
-    const bool fileTimeUpdated =
-        targetFile.setFileTime(sourceInfo.lastModified(), QFileDevice::FileModificationTime);
-    targetFile.close();
-    if (!fileTimeUpdated) {
-        if (errorMessage != nullptr) {
-            *errorMessage = QObject::tr("复制成功但设置修改时间失败，target=%1").arg(targetPath);
-        }
-        return false;
-    }
+    // const bool fileTimeUpdated =
+    //     targetFile.setFileTime(sourceInfo.lastModified(), QFileDevice::FileModificationTime);
+    // targetFile.close();
+    // if (!fileTimeUpdated) {
+    //     if (errorMessage != nullptr) {
+    //         *errorMessage = QObject::tr("复制成功但设置修改时间失败，target=%1").arg(targetPath);
+    //     }
+    //     return false;
+    // }
 
     return true;
 }
@@ -293,6 +326,7 @@ bool collectSourceEntries(const QString &sourcePath,
 bool buildSyncPlan(const QString &sourcePath,
                    const QString &targetPath,
                    QVector<SyncOperation> *operations,
+                   SyncPlanStats *planStats,
                    QString *errorMessage)
 {
     QHash<QString, SyncEntryType> sourceEntries;
@@ -336,6 +370,8 @@ bool buildSyncPlan(const QString &sourcePath,
                                       &operationKeys,
                                       &removeDirectoryOperations);
                 removedDirectoryRoots.append(relativePath);
+                ++planStats->removeDirectoryCount;
+                planStats->removeFileCount += countFilesUnderDirectory(targetInfo.absoluteFilePath());
             }
             continue;
         }
@@ -346,6 +382,7 @@ bool buildSyncPlan(const QString &sourcePath,
                     {SyncOperationType::E_RemoveFile, QString(), targetInfo.absoluteFilePath(), relativePath},
                     &operationKeys,
                     &removeFileOperations);
+                ++planStats->removeFileCount;
             }
             continue;
         }
@@ -375,6 +412,7 @@ bool buildSyncPlan(const QString &sourcePath,
                     {SyncOperationType::E_CreateDirectory, QString(), targetAbsolutePath, relativePath},
                     &operationKeys,
                     &createDirectoryOperations);
+                ++planStats->createDirectoryCount;
             }
             continue;
         }
@@ -385,6 +423,12 @@ bool buildSyncPlan(const QString &sourcePath,
                     {SyncOperationType::E_CopyFile, sourceInfo.absoluteFilePath(), targetAbsolutePath, relativePath},
                     &operationKeys,
                     &copyFileOperations);
+
+                if (targetInfo.exists() && targetInfo.isFile()) {
+                    ++planStats->updateFileCount;
+                } else {
+                    ++planStats->addFileCount;
+                }
             }
             continue;
         }
@@ -454,6 +498,14 @@ QString buildSummary(const QVector<SyncOperation> &operations)
         .arg(removeFileCount)
         .arg(removeDirectoryCount);
 }
+
+QString buildPlanPreviewSummary(const SyncPlanStats &planStats)
+{
+    return QObject::tr("备份前检查：待删除文件 %1，待新增文件 %2，待同步文件 %3。")
+        .arg(planStats.removeFileCount)
+        .arg(planStats.addFileCount)
+        .arg(planStats.updateFileCount);
+}
 } // namespace
 
 FolderSyncWorker::FolderSyncWorker(QObject *parent)
@@ -509,13 +561,20 @@ void FolderSyncWorker::slotStartSync(const QString &sourcePath, const QString &t
     }
 
     QVector<SyncOperation> operations;
-    if (!buildSyncPlan(normalizedSourcePath, normalizedTargetPath, &operations, &errorMessage)) {
+    SyncPlanStats planStats;
+    if (!buildSyncPlan(normalizedSourcePath, normalizedTargetPath, &operations, &planStats, &errorMessage)) {
         emit sigLogMessage(errorMessage);
         emit sigSyncFinished(false, errorMessage);
         return;
     }
 
-    emit sigSyncStarted(operations.size(), reason);
+    const QString planPreviewSummary = buildPlanPreviewSummary(planStats);
+    emit sigLogMessage(planPreviewSummary);
+    emit sigSyncStarted(operations.size(),
+                        planStats.removeFileCount,
+                        planStats.addFileCount,
+                        planStats.updateFileCount,
+                        reason);
     if (operations.isEmpty()) {
         const QString summary = QObject::tr("A 与 B 已一致，无需同步。");
         emit sigLogMessage(summary);

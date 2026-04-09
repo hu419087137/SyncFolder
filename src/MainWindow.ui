@@ -6,19 +6,19 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>980</width>
-    <height>680</height>
+    <width>1100</width>
+    <height>760</height>
    </rect>
   </property>
   <property name="windowTitle">
-   <string>SyncFolder - A 主目录到 B 备份目录同步</string>
+   <string>SyncFolder - 多组文件夹同步</string>
   </property>
   <widget class="QWidget" name="centralWidget">
    <layout class="QVBoxLayout" name="mainLayout">
     <item>
      <widget class="QLabel" name="tipsLabel">
       <property name="text">
-       <string>同步规则：A 是主目录，B 是备份目录。程序会把 B 校正到和 A 一致，包括复制新增/变更文件，以及删除 B 中多余内容。</string>
+       <string>同步规则：每一组都以 A 主目录为准，把对应的 B 备份目录校正到与 A 一致。支持新增多组同步对，并自动记住上一次配置的路径。</string>
       </property>
       <property name="wordWrap">
        <bool>true</bool>
@@ -26,62 +26,67 @@
      </widget>
     </item>
     <item>
-     <widget class="QGroupBox" name="pathGroupBox">
+     <widget class="QGroupBox" name="pairGroupBox">
       <property name="title">
-       <string>目录配置</string>
+       <string>同步对配置</string>
       </property>
-      <layout class="QGridLayout" name="pathLayout">
-       <item row="0" column="0">
-        <widget class="QLabel" name="sourceLabel">
-         <property name="text">
-          <string>A 主目录</string>
-         </property>
-        </widget>
+      <layout class="QVBoxLayout" name="pairGroupLayout">
+       <item>
+        <layout class="QHBoxLayout" name="pairActionLayout">
+         <item>
+          <widget class="QPushButton" name="addPairButton">
+           <property name="text">
+            <string>新增同步对</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QPushButton" name="removePairButton">
+           <property name="text">
+            <string>删除选中项</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <spacer name="pairActionSpacer">
+           <property name="orientation">
+            <enum>Qt::Horizontal</enum>
+           </property>
+           <property name="sizeHint" stdset="0">
+            <size>
+             <width>40</width>
+             <height>20</height>
+            </size>
+           </property>
+          </spacer>
+         </item>
+        </layout>
        </item>
-       <item row="0" column="1">
-        <widget class="QLineEdit" name="sourcePathEdit">
-         <property name="placeholderText">
-          <string>请选择 A 主目录</string>
+      <item>
+       <widget class="QTableView" name="pairTableView">
+         <property name="alternatingRowColors">
+          <bool>true</bool>
          </property>
-        </widget>
-       </item>
-       <item row="0" column="2">
-        <widget class="QPushButton" name="browseSourceButton">
-         <property name="text">
-          <string>浏览...</string>
+         <property name="selectionMode">
+          <enum>QAbstractItemView::SingleSelection</enum>
          </property>
-        </widget>
-       </item>
-       <item row="1" column="0">
-        <widget class="QLabel" name="targetLabel">
-         <property name="text">
-          <string>B 备份目录</string>
+         <property name="selectionBehavior">
+          <enum>QAbstractItemView::SelectRows</enum>
          </property>
-        </widget>
-       </item>
-       <item row="1" column="1">
-        <widget class="QLineEdit" name="targetPathEdit">
-         <property name="placeholderText">
-          <string>请选择 B 备份目录</string>
+         <property name="editTriggers">
+          <set>QAbstractItemView::NoEditTriggers</set>
          </property>
-        </widget>
-       </item>
-       <item row="1" column="2">
-        <widget class="QPushButton" name="browseTargetButton">
-         <property name="text">
-          <string>浏览...</string>
-         </property>
-        </widget>
-       </item>
-      </layout>
-     </widget>
+       </widget>
+      </item>
+     </layout>
+    </widget>
     </item>
     <item>
      <layout class="QHBoxLayout" name="buttonLayout">
       <item>
        <widget class="QPushButton" name="startMonitorButton">
         <property name="text">
-         <string>启动监控</string>
+         <string>启动全部监控</string>
         </property>
        </widget>
       </item>
@@ -93,9 +98,9 @@
        </widget>
       </item>
       <item>
-       <widget class="QPushButton" name="manualSyncButton">
+       <widget class="QPushButton" name="syncAllPairsButton">
         <property name="text">
-         <string>立即同步</string>
+         <string>同步全部</string>
         </property>
        </widget>
       </item>
@@ -130,7 +135,7 @@
        <item>
         <widget class="QLabel" name="detailLabel">
          <property name="text">
-          <string>请选择目录后开始同步。</string>
+          <string>请先新增至少一组同步对。</string>
          </property>
          <property name="wordWrap">
           <bool>true</bool>
@@ -162,7 +167,7 @@
           <bool>true</bool>
          </property>
          <property name="maximumBlockCount">
-          <number>1000</number>
+          <number>1500</number>
          </property>
         </widget>
        </item>

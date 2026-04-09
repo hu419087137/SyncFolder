@@ -34,10 +34,17 @@ FolderWatcher::FolderWatcher(QObject *parent)
     connect(_fileSystemWatcher, &QFileSystemWatcher::directoryChanged, this, &FolderWatcher::slotDirectoryChanged);
 }
 
-void FolderWatcher::setWatchedFolders(const QString &sourcePath, const QString &targetPath)
+void FolderWatcher::setWatchedFolders(const QStringList &folderPaths)
 {
-    _sourcePath = normalizePath(sourcePath);
-    _targetPath = normalizePath(targetPath);
+    _folderPaths.clear();
+    _folderPaths.reserve(folderPaths.size());
+    for (const QString &folderPath : folderPaths) {
+        const QString normalizedFolderPath = normalizePath(folderPath);
+        if (!normalizedFolderPath.isEmpty()) {
+            _folderPaths.append(normalizedFolderPath);
+        }
+    }
+
     rebuildWatches();
 }
 
@@ -64,21 +71,14 @@ void FolderWatcher::rebuildWatches()
     clear();
 
     QSet<QString> watchPaths;
-    appendUniquePath(_sourcePath, &watchPaths);
-    appendUniquePath(_targetPath, &watchPaths);
+    for (const QString &folderPath : _folderPaths) {
+        appendUniquePath(folderPath, &watchPaths);
+        appendUniquePath(QFileInfo(folderPath).dir().absolutePath(), &watchPaths);
 
-    const QString sourceParentPath = QFileInfo(_sourcePath).dir().absolutePath();
-    const QString targetParentPath = QFileInfo(_targetPath).dir().absolutePath();
-    appendUniquePath(sourceParentPath, &watchPaths);
-    appendUniquePath(targetParentPath, &watchPaths);
-
-    const QStringList sourceDirectories = collectDirectoryPaths(_sourcePath);
-    const QStringList targetDirectories = collectDirectoryPaths(_targetPath);
-    for (const QString &directoryPath : sourceDirectories) {
-        appendUniquePath(directoryPath, &watchPaths);
-    }
-    for (const QString &directoryPath : targetDirectories) {
-        appendUniquePath(directoryPath, &watchPaths);
+        const QStringList directoryPaths = collectDirectoryPaths(folderPath);
+        for (const QString &directoryPath : directoryPaths) {
+            appendUniquePath(directoryPath, &watchPaths);
+        }
     }
 
     QStringList existingWatchPaths;

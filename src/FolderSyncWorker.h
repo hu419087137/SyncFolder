@@ -32,9 +32,16 @@ signals:
     /**
      * @brief 同步计划已生成，准备开始执行。
      * @param totalSteps 本次需要执行的总步骤数。
+     * @param removeFileCount 备份前需要删除的文件数量。
+     * @param addFileCount 备份前需要新增的文件数量。
+     * @param updateFileCount 备份前需要同步覆盖的文件数量。
      * @param reason 触发同步的原因。
      */
-    void sigSyncStarted(int totalSteps, const QString &reason);
+    void sigSyncStarted(int totalSteps,
+                        int removeFileCount,
+                        int addFileCount,
+                        int updateFileCount,
+                        const QString &reason);
 
     /**
      * @brief 当前步骤进度发生变化。

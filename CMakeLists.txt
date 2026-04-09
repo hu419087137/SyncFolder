@@ -18,6 +18,9 @@ set(projectSources
     src/MainWindow.cpp
     src/MainWindow.h
     src/MainWindow.ui
+    src/PairEditDialog.cpp
+    src/PairEditDialog.h
+    src/PairEditDialog.ui
     src/FolderSyncWorker.cpp
     src/FolderSyncWorker.h
     src/FolderWatcher.cpp
