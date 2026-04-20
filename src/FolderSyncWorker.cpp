@@ -13,7 +13,7 @@
 #include <filesystem>
 namespace
 {
-constexpr qint64 kTimestampToleranceMs = 2000;
+constexpr qint64 kFileCompareChunkSize = 1024 * 1024;
 
 enum class SyncEntryType
 {
@@ -28,6 +28,13 @@ enum class SyncOperationType
     E_RemoveDirectory,
     E_CreateDirectory,
     E_CopyFile
+};
+
+enum class FileCompareResult
+{
+    E_Same,
+    E_Different,
+    E_Error
 };
 
 struct SyncOperation
@@ -134,19 +141,63 @@ void appendUniqueOperation(const SyncOperation &operation,
     operations->append(operation);
 }
 
-bool isFileDifferent(const QFileInfo &sourceInfo, const QFileInfo &targetInfo)
+FileCompareResult compareFileContent(const QFileInfo &sourceInfo,
+                                     const QFileInfo &targetInfo,
+                                     QString *errorMessage)
 {
     if (!targetInfo.exists() || !targetInfo.isFile()) {
-        return true;
+        return FileCompareResult::E_Different;
     }
 
     if (sourceInfo.size() != targetInfo.size()) {
-        return true;
+        return FileCompareResult::E_Different;
     }
 
-    const qint64 timestampDeltaMs =
-        qAbs(sourceInfo.lastModified().toMSecsSinceEpoch() - targetInfo.lastModified().toMSecsSinceEpoch());
-    return timestampDeltaMs > kTimestampToleranceMs;
+    QFile sourceFile(sourceInfo.absoluteFilePath());
+    if (!sourceFile.open(QIODevice::ReadOnly)) {
+        if (errorMessage != nullptr) {
+            *errorMessage = QObject::tr("读取主目录文件失败，path=%1，error=%2")
+                                .arg(sourceInfo.absoluteFilePath(), sourceFile.errorString());
+        }
+        return FileCompareResult::E_Error;
+    }
+
+    QFile targetFile(targetInfo.absoluteFilePath());
+    if (!targetFile.open(QIODevice::ReadOnly)) {
+        if (errorMessage != nullptr) {
+            *errorMessage = QObject::tr("读取备份目录文件失败，path=%1，error=%2")
+                                .arg(targetInfo.absoluteFilePath(), targetFile.errorString());
+        }
+        return FileCompareResult::E_Error;
+    }
+
+    while (true) {
+        const QByteArray sourceChunk = sourceFile.read(kFileCompareChunkSize);
+        if (sourceChunk.isEmpty() && sourceFile.error() != QFileDevice::NoError) {
+            if (errorMessage != nullptr) {
+                *errorMessage = QObject::tr("读取主目录文件内容失败，path=%1，error=%2")
+                                    .arg(sourceInfo.absoluteFilePath(), sourceFile.errorString());
+            }
+            return FileCompareResult::E_Error;
+        }
+
+        const QByteArray targetChunk = targetFile.read(kFileCompareChunkSize);
+        if (targetChunk.isEmpty() && targetFile.error() != QFileDevice::NoError) {
+            if (errorMessage != nullptr) {
+                *errorMessage = QObject::tr("读取备份目录文件内容失败，path=%1，error=%2")
+                                    .arg(targetInfo.absoluteFilePath(), targetFile.errorString());
+            }
+            return FileCompareResult::E_Error;
+        }
+
+        if (sourceChunk != targetChunk) {
+            return FileCompareResult::E_Different;
+        }
+
+        if (sourceChunk.isEmpty()) {
+            return FileCompareResult::E_Same;
+        }
+    }
 }
 
 int countFilesUnderDirectory(const QString &directoryPath)
@@ -418,7 +469,16 @@ bool buildSyncPlan(const QString &sourcePath,
         }
 
         if (sourceInfo.isFile()) {
-            if (!targetInfo.exists() || !targetInfo.isFile() || isFileDifferent(sourceInfo, targetInfo)) {
+            QString compareErrorMessage;
+            const FileCompareResult compareResult = compareFileContent(sourceInfo, targetInfo, &compareErrorMessage);
+            if (compareResult == FileCompareResult::E_Error) {
+                if (errorMessage != nullptr) {
+                    *errorMessage = compareErrorMessage;
+                }
+                return false;
+            }
+
+            if (compareResult == FileCompareResult::E_Different) {
                 appendUniqueOperation(
                     {SyncOperationType::E_CopyFile, sourceInfo.absoluteFilePath(), targetAbsolutePath, relativePath},
                     &operationKeys,
