@@ -4,7 +4,7 @@
 
 ## 界面预览
 
-![SyncFolder 界面预览](docs/images/syncfolder-preview.svg)
+![SyncFolder 界面预览](docs/images/syncfolder-preview.jpg)
 
 - 支持动态维护多组 `A -> B` 同步对
 - 每一组中 `A` 为主目录，`B` 为备份目录
