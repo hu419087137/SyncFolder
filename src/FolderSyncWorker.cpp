@@ -12,7 +12,6 @@
 #include <QVector>
 
 #include <functional>
-#include <filesystem>
 namespace
 {
 constexpr qint64 kFileCompareChunkSize = 1024 * 1024;
@@ -47,6 +46,14 @@ struct SyncOperation
     QString targetPath;
     QString relativePath;
     qint64 progressUnits = 1;
+};
+
+struct SourceEntry
+{
+    QString absolutePath;
+    QString relativePath;
+    SyncEntryType type = SyncEntryType::E_Unknown;
+    qint64 fileSize = 0;
 };
 
 struct SyncPlanStats
@@ -128,13 +135,21 @@ QString buildPlanningProgressText(const QString &stageText, qint64 current, qint
     return QObject::tr("%1（%2/%3）").arg(stageText).arg(current).arg(total);
 }
 
-QString buildCountingProgressText(const QString &stageText, qint64 currentCount)
+QString buildProcessedProgressText(const QString &stageText, qint64 currentCount)
 {
     if (currentCount <= 0) {
         return stageText;
     }
 
-    return QObject::tr("%1（已统计 %2）").arg(stageText).arg(currentCount);
+    return QObject::tr("%1（已处理 %2）").arg(stageText).arg(currentCount);
+}
+
+QString buildFileCompareProgressText(qint64 currentEntry, qint64 totalEntries, int filePercent)
+{
+    return QObject::tr("正在比对文件差异（%1/%2，当前文件 %3%）")
+        .arg(currentEntry)
+        .arg(totalEntries)
+        .arg(filePercent);
 }
 
 bool shouldReportPlanningProgress(qint64 current, qint64 total)
@@ -158,6 +173,20 @@ bool shouldReportCountingProgress(qint64 currentCount)
     }
 
     return currentCount == 1 || currentCount % 200 == 0;
+}
+
+bool shouldReportByteProgress(qint64 currentBytes, qint64 totalBytes)
+{
+    if (currentBytes <= 0 || totalBytes <= 0) {
+        return false;
+    }
+
+    if (currentBytes >= totalBytes) {
+        return true;
+    }
+
+    const qint64 reportInterval = qMax<qint64>(kFileCompareChunkSize, totalBytes / 100);
+    return currentBytes % reportInterval < kFileCompareChunkSize;
 }
 
 QString describeOperation(const SyncOperation &operation)
@@ -204,6 +233,7 @@ void appendUniqueOperation(const SyncOperation &operation,
 
 FileCompareResult compareFileContent(const QFileInfo &sourceInfo,
                                      const QFileInfo &targetInfo,
+                                     const std::function<void(qint64, qint64)> &progressCallback,
                                      QString *errorMessage)
 {
     if (!targetInfo.exists() || !targetInfo.isFile()) {
@@ -233,6 +263,11 @@ FileCompareResult compareFileContent(const QFileInfo &sourceInfo,
     }
 
     while (true) {
+        const qint64 comparedBytes = sourceFile.pos();
+        if (progressCallback != nullptr && shouldReportByteProgress(comparedBytes, sourceInfo.size())) {
+            progressCallback(comparedBytes, sourceInfo.size());
+        }
+
         const QByteArray sourceChunk = sourceFile.read(kFileCompareChunkSize);
         if (sourceChunk.isEmpty() && sourceFile.error() != QFileDevice::NoError) {
             if (errorMessage != nullptr) {
@@ -256,45 +291,12 @@ FileCompareResult compareFileContent(const QFileInfo &sourceInfo,
         }
 
         if (sourceChunk.isEmpty()) {
+            if (progressCallback != nullptr) {
+                progressCallback(sourceInfo.size(), sourceInfo.size());
+            }
             return FileCompareResult::E_Same;
         }
     }
-}
-
-int countFilesUnderDirectory(const QString &directoryPath)
-{
-    int fileCount = 0;
-    QDirIterator iterator(directoryPath,
-                          QDir::Files | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System,
-                          QDirIterator::Subdirectories);
-    while (iterator.hasNext()) {
-        iterator.next();
-        ++fileCount;
-    }
-
-    return fileCount;
-}
-
-qint64 countEntriesUnderDirectory(const QString &directoryPath,
-                                 const std::function<void(qint64)> &progressCallback = {})
-{
-    qint64 entryCount = 0;
-    QDirIterator iterator(directoryPath,
-                          QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System,
-                          QDirIterator::Subdirectories);
-    while (iterator.hasNext()) {
-        iterator.next();
-        ++entryCount;
-        if (progressCallback != nullptr && shouldReportCountingProgress(entryCount)) {
-            progressCallback(entryCount);
-        }
-    }
-
-    if (progressCallback != nullptr && entryCount > 0 && !shouldReportCountingProgress(entryCount)) {
-        progressCallback(entryCount);
-    }
-
-    return entryCount;
 }
 
 bool ensureDirectoryExists(const QString &directoryPath, QString *errorMessage)
@@ -461,20 +463,16 @@ bool copyFileWithMetadata(const SyncOperation &operation,
 }
 
 bool collectSourceEntries(const QString &sourcePath,
-                          QHash<QString, SyncEntryType> *sourceEntries,
-                          qint64 totalEntryCount,
+                          QVector<SourceEntry> *sourceEntries,
+                          QHash<QString, SyncEntryType> *sourceEntryTypes,
                           const std::function<void(const PlanStageProgress &)> &stageCallback,
-                          qint64 *collectedEntryCount,
                           QString *errorMessage)
 {
-    if (collectedEntryCount != nullptr) {
-        *collectedEntryCount = 0;
-    }
-
     QDir sourceRoot(sourcePath);
     QDirIterator iterator(sourcePath,
                           QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System,
                           QDirIterator::Subdirectories);
+    qint64 collectedEntryCount = 0;
     while (iterator.hasNext()) {
         iterator.next();
 
@@ -488,35 +486,28 @@ bool collectSourceEntries(const QString &sourcePath,
 
         const QString relativePath = normalizeRelativePath(sourceRoot, fileInfo.absoluteFilePath());
         if (fileInfo.isDir()) {
-            sourceEntries->insert(relativePath, SyncEntryType::E_Directory);
-            if (collectedEntryCount != nullptr) {
-                ++(*collectedEntryCount);
-                if (stageCallback != nullptr
-                    && shouldReportPlanningProgress(*collectedEntryCount, totalEntryCount)) {
-                    stageCallback(
-                        {*collectedEntryCount,
-                         totalEntryCount,
-                         buildPlanningProgressText(QObject::tr("正在扫描主目录"),
-                                                  *collectedEntryCount,
-                                                  totalEntryCount)});
-                }
+            ++collectedEntryCount;
+            sourceEntries->append({fileInfo.absoluteFilePath(), relativePath, SyncEntryType::E_Directory, 0});
+            sourceEntryTypes->insert(relativePath, SyncEntryType::E_Directory);
+            if (stageCallback != nullptr && shouldReportCountingProgress(collectedEntryCount)) {
+                stageCallback({collectedEntryCount,
+                               0,
+                               buildProcessedProgressText(QObject::tr("正在扫描主目录"),
+                                                          collectedEntryCount)});
             }
             continue;
         }
 
         if (fileInfo.isFile()) {
-            sourceEntries->insert(relativePath, SyncEntryType::E_File);
-            if (collectedEntryCount != nullptr) {
-                ++(*collectedEntryCount);
-                if (stageCallback != nullptr
-                    && shouldReportPlanningProgress(*collectedEntryCount, totalEntryCount)) {
-                    stageCallback(
-                        {*collectedEntryCount,
-                         totalEntryCount,
-                         buildPlanningProgressText(QObject::tr("正在扫描主目录"),
-                                                  *collectedEntryCount,
-                                                  totalEntryCount)});
-                }
+            ++collectedEntryCount;
+            sourceEntries->append(
+                {fileInfo.absoluteFilePath(), relativePath, SyncEntryType::E_File, fileInfo.size()});
+            sourceEntryTypes->insert(relativePath, SyncEntryType::E_File);
+            if (stageCallback != nullptr && shouldReportCountingProgress(collectedEntryCount)) {
+                stageCallback({collectedEntryCount,
+                               0,
+                               buildProcessedProgressText(QObject::tr("正在扫描主目录"),
+                                                          collectedEntryCount)});
             }
             continue;
         }
@@ -525,6 +516,13 @@ bool collectSourceEntries(const QString &sourcePath,
             *errorMessage = QObject::tr("检测到不支持的文件类型，path=%1").arg(fileInfo.absoluteFilePath());
         }
         return false;
+    }
+
+    if (stageCallback != nullptr && collectedEntryCount > 0
+        && !shouldReportCountingProgress(collectedEntryCount)) {
+        stageCallback({collectedEntryCount,
+                       0,
+                       buildProcessedProgressText(QObject::tr("正在扫描主目录"), collectedEntryCount)});
     }
 
     return true;
@@ -537,28 +535,15 @@ bool buildSyncPlan(const QString &sourcePath,
                    const std::function<void(const PlanStageProgress &)> &stageCallback,
                    QString *errorMessage)
 {
-    QHash<QString, SyncEntryType> sourceEntries;
+    QVector<SourceEntry> sourceEntries;
+    QHash<QString, SyncEntryType> sourceEntryTypes;
     if (stageCallback != nullptr) {
-        stageCallback({0, 0, QObject::tr("正在统计主目录条目")});
+        stageCallback({0, 0, QObject::tr("正在扫描主目录")});
     }
-    const qint64 sourceEntryTotal = countEntriesUnderDirectory(
-        sourcePath,
-        [stageCallback](qint64 currentCount) {
-            if (stageCallback != nullptr) {
-                stageCallback(
-                    {0, 0, buildCountingProgressText(QObject::tr("正在统计主目录条目"), currentCount)});
-            }
-        });
-    if (stageCallback != nullptr) {
-        stageCallback(
-            {0, sourceEntryTotal, buildPlanningProgressText(QObject::tr("正在扫描主目录"), 0, sourceEntryTotal)});
-    }
-    qint64 sourceEntryCount = 0;
     if (!collectSourceEntries(sourcePath,
                               &sourceEntries,
-                              sourceEntryTotal,
+                              &sourceEntryTypes,
                               stageCallback,
-                              &sourceEntryCount,
                               errorMessage)) {
         return false;
     }
@@ -572,19 +557,7 @@ bool buildSyncPlan(const QString &sourcePath,
     QStringList removedDirectoryRoots;
 
     if (stageCallback != nullptr) {
-        stageCallback({0, 0, QObject::tr("正在统计备份目录条目")});
-    }
-    const qint64 targetEntryCount = countEntriesUnderDirectory(
-        targetPath,
-        [stageCallback](qint64 currentCount) {
-            if (stageCallback != nullptr) {
-                stageCallback(
-                    {0, 0, buildCountingProgressText(QObject::tr("正在统计备份目录条目"), currentCount)});
-            }
-        });
-    if (stageCallback != nullptr) {
-        stageCallback(
-            {0, targetEntryCount, buildPlanningProgressText(QObject::tr("正在检查备份目录"), 0, targetEntryCount)});
+        stageCallback({0, 0, QObject::tr("正在检查备份目录")});
     }
     QDirIterator targetIterator(targetPath,
                                 QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System,
@@ -605,10 +578,13 @@ bool buildSyncPlan(const QString &sourcePath,
 
         const QString relativePath = normalizeRelativePath(targetRoot, targetInfo.absoluteFilePath());
         if (isUnderRemovedDirectoryRoot(relativePath, removedDirectoryRoots)) {
+            if (targetInfo.isFile()) {
+                ++planStats->removeFileCount;
+            }
             continue;
         }
 
-        const SyncEntryType sourceEntryType = sourceEntries.value(relativePath, SyncEntryType::E_Unknown);
+        const SyncEntryType sourceEntryType = sourceEntryTypes.value(relativePath, SyncEntryType::E_Unknown);
         if (targetInfo.isDir()) {
             if (sourceEntryType == SyncEntryType::E_File || sourceEntryType == SyncEntryType::E_Unknown) {
                 appendUniqueOperation({SyncOperationType::E_RemoveDirectory, QString(), targetInfo.absoluteFilePath(),
@@ -617,16 +593,12 @@ bool buildSyncPlan(const QString &sourcePath,
                                       &removeDirectoryOperations);
                 removedDirectoryRoots.append(relativePath);
                 ++planStats->removeDirectoryCount;
-                planStats->removeFileCount += countFilesUnderDirectory(targetInfo.absoluteFilePath());
             }
-            if (stageCallback != nullptr
-                && shouldReportPlanningProgress(checkedTargetEntryCount, targetEntryCount)) {
-                stageCallback(
-                    {checkedTargetEntryCount,
-                     targetEntryCount,
-                     buildPlanningProgressText(QObject::tr("正在检查备份目录"),
-                                              checkedTargetEntryCount,
-                                              targetEntryCount)});
+            if (stageCallback != nullptr && shouldReportCountingProgress(checkedTargetEntryCount)) {
+                stageCallback({checkedTargetEntryCount,
+                               0,
+                               buildProcessedProgressText(QObject::tr("正在检查备份目录"),
+                                                          checkedTargetEntryCount)});
             }
             continue;
         }
@@ -639,14 +611,11 @@ bool buildSyncPlan(const QString &sourcePath,
                     &removeFileOperations);
                 ++planStats->removeFileCount;
             }
-            if (stageCallback != nullptr
-                && shouldReportPlanningProgress(checkedTargetEntryCount, targetEntryCount)) {
-                stageCallback(
-                    {checkedTargetEntryCount,
-                     targetEntryCount,
-                     buildPlanningProgressText(QObject::tr("正在检查备份目录"),
-                                              checkedTargetEntryCount,
-                                              targetEntryCount)});
+            if (stageCallback != nullptr && shouldReportCountingProgress(checkedTargetEntryCount)) {
+                stageCallback({checkedTargetEntryCount,
+                               0,
+                               buildProcessedProgressText(QObject::tr("正在检查备份目录"),
+                                                          checkedTargetEntryCount)});
             }
             continue;
         }
@@ -658,27 +627,28 @@ bool buildSyncPlan(const QString &sourcePath,
         return false;
     }
 
-    const QDir sourceRoot(sourcePath);
+    if (stageCallback != nullptr && checkedTargetEntryCount > 0
+        && !shouldReportCountingProgress(checkedTargetEntryCount)) {
+        stageCallback({checkedTargetEntryCount,
+                       0,
+                       buildProcessedProgressText(QObject::tr("正在检查备份目录"), checkedTargetEntryCount)});
+    }
+
+    const qint64 sourceEntryCount = sourceEntries.size();
     if (stageCallback != nullptr) {
         stageCallback({0, sourceEntryCount, buildPlanningProgressText(QObject::tr("正在比对文件差异"), 0, sourceEntryCount)});
     }
-    QDirIterator sourceIterator(sourcePath,
-                                QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System,
-                                QDirIterator::Subdirectories);
     qint64 comparedSourceEntryCount = 0;
-    while (sourceIterator.hasNext()) {
-        sourceIterator.next();
+    for (const SourceEntry &sourceEntry : sourceEntries) {
         ++comparedSourceEntryCount;
 
-        const QFileInfo sourceInfo = sourceIterator.fileInfo();
-        const QString relativePath = normalizeRelativePath(sourceRoot, sourceInfo.absoluteFilePath());
-        const QString targetAbsolutePath = targetRoot.absoluteFilePath(relativePath);
+        const QString targetAbsolutePath = targetRoot.absoluteFilePath(sourceEntry.relativePath);
         const QFileInfo targetInfo(targetAbsolutePath);
 
-        if (sourceInfo.isDir()) {
+        if (sourceEntry.type == SyncEntryType::E_Directory) {
             if (!targetInfo.exists() || !targetInfo.isDir()) {
                 appendUniqueOperation(
-                    {SyncOperationType::E_CreateDirectory, QString(), targetAbsolutePath, relativePath},
+                    {SyncOperationType::E_CreateDirectory, QString(), targetAbsolutePath, sourceEntry.relativePath},
                     &operationKeys,
                     &createDirectoryOperations);
                 ++planStats->createDirectoryCount;
@@ -695,9 +665,32 @@ bool buildSyncPlan(const QString &sourcePath,
             continue;
         }
 
-        if (sourceInfo.isFile()) {
+        if (sourceEntry.type == SyncEntryType::E_File) {
             QString compareErrorMessage;
-            const FileCompareResult compareResult = compareFileContent(sourceInfo, targetInfo, &compareErrorMessage);
+            const QFileInfo sourceInfo(sourceEntry.absolutePath);
+            const FileCompareResult compareResult =
+                compareFileContent(sourceInfo,
+                                   targetInfo,
+                                   [stageCallback, comparedSourceEntryCount, sourceEntryCount](
+                                       qint64 comparedBytes,
+                                       qint64 totalBytes) {
+                                       if (stageCallback == nullptr || totalBytes <= 0) {
+                                           return;
+                                       }
+
+                                       stageCallback(
+                                           {comparedSourceEntryCount,
+                                            sourceEntryCount,
+                                            buildFileCompareProgressText(
+                                                comparedSourceEntryCount,
+                                                sourceEntryCount,
+                                                qBound<int>(
+                                                    0,
+                                                    qRound(static_cast<double>(comparedBytes) * 100.0
+                                                           / static_cast<double>(totalBytes)),
+                                                    100))});
+                                   },
+                                   &compareErrorMessage);
             if (compareResult == FileCompareResult::E_Error) {
                 if (errorMessage != nullptr) {
                     *errorMessage = compareErrorMessage;
@@ -708,10 +701,10 @@ bool buildSyncPlan(const QString &sourcePath,
             if (compareResult == FileCompareResult::E_Different) {
                 appendUniqueOperation(
                     {SyncOperationType::E_CopyFile,
-                     sourceInfo.absoluteFilePath(),
+                     sourceEntry.absolutePath,
                      targetAbsolutePath,
-                     relativePath,
-                     calculateCopyProgressUnits(sourceInfo.size())},
+                     sourceEntry.relativePath,
+                     calculateCopyProgressUnits(sourceEntry.fileSize)},
                     &operationKeys,
                     &copyFileOperations);
 
@@ -734,7 +727,8 @@ bool buildSyncPlan(const QString &sourcePath,
         }
 
         if (errorMessage != nullptr) {
-            *errorMessage = QObject::tr("主目录中存在不支持的文件类型，path=%1").arg(sourceInfo.absoluteFilePath());
+            *errorMessage =
+                QObject::tr("主目录中存在不支持的文件类型，path=%1").arg(sourceEntry.absolutePath);
         }
         return false;
     }

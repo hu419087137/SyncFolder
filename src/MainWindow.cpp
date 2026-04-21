@@ -168,6 +168,40 @@ QColor buildStatusTextColor(const QString &statusText, bool isSyncEnabled, const
     return isDarkTheme ? palette.color(QPalette::Text) : QColor(48, 60, 78);
 }
 
+QString stripProgressSuffix(const QString &statusText)
+{
+    auto stripByParentheses = [&statusText](QChar openParenthesis, QChar closeParenthesis) {
+        const int openIndex = statusText.lastIndexOf(openParenthesis);
+        if (openIndex < 0 || !statusText.endsWith(closeParenthesis)) {
+            return statusText;
+        }
+
+        const QString progressText =
+            statusText.mid(openIndex + 1, statusText.size() - openIndex - 2).trimmed();
+        const QStringList progressParts = progressText.split(QLatin1Char('/'));
+        if (progressParts.size() != 2) {
+            return statusText;
+        }
+
+        bool isCurrentStepValid = false;
+        bool isTotalStepValid = false;
+        progressParts.at(0).trimmed().toLongLong(&isCurrentStepValid);
+        progressParts.at(1).trimmed().toLongLong(&isTotalStepValid);
+        if (!isCurrentStepValid || !isTotalStepValid) {
+            return statusText;
+        }
+
+        return statusText.left(openIndex).trimmed();
+    };
+
+    const QString fullWidthResult = stripByParentheses(QChar(0xff08), QChar(0xff09));
+    if (fullWidthResult != statusText) {
+        return fullWidthResult;
+    }
+
+    return stripByParentheses(QLatin1Char('('), QLatin1Char(')'));
+}
+
 class PairStatusDelegate : public QStyledItemDelegate
 {
 public:
@@ -815,35 +849,38 @@ void MainWindow::requestSyncByIndexes(const QVector<int> &pairIndexes, const QSt
         return;
     }
 
-    int startedPairCount = 0;
-    int pendingPairCount = 0;
-    QVector<int> startedPairIndexes;
     QVector<int> pendingPairIndexes;
-    startedPairIndexes.reserve(normalizedIndexes.size());
+    QVector<int> readyPairIndexes;
     pendingPairIndexes.reserve(normalizedIndexes.size());
+    readyPairIndexes.reserve(normalizedIndexes.size());
+
     for (int pairIndex : normalizedIndexes) {
         if (isPairSyncRunning(pairIndex)) {
             _pendingSyncReasons.insert(pairIndex, reason);
-            ++pendingPairCount;
             pendingPairIndexes.append(pairIndex);
-            continue;
+        } else {
+            readyPairIndexes.append(pairIndex);
         }
-        startPairSync(pairIndex, reason);
-        ++startedPairCount;
-        startedPairIndexes.append(pairIndex);
     }
+
+    for (int pairIndex : readyPairIndexes) {
+        startPairSync(pairIndex, reason);
+    }
+
+    const int startedPairCount = readyPairIndexes.size();
+    const int pendingPairCount = pendingPairIndexes.size();
 
     if (startedPairCount > 0 || pendingPairCount > 0) {
         appendLog(tr("已发起并行同步请求：立即启动 %1 组，待当前任务完成后补同步 %2 组，reason=%3")
                       .arg(startedPairCount)
                       .arg(pendingPairCount)
                       .arg(reason));
-        if (!startedPairIndexes.isEmpty()) {
-            appendLog(tr("已立即启动：%1").arg(buildPairListSummaryText(startedPairIndexes)));
+        if (!readyPairIndexes.isEmpty()) {
+            appendLog(tr("已立即启动：%1").arg(buildPairListSummaryText(readyPairIndexes)));
         }
-        if (!pendingPairIndexes.isEmpty()) {
-            appendLog(tr("已加入待补同步队列：%1").arg(buildPairListSummaryText(pendingPairIndexes)));
-        }
+    }
+    if (pendingPairCount > 0) {
+        appendLog(tr("已加入待同步队列：%1").arg(buildPairListSummaryText(pendingPairIndexes)));
     }
 
     refreshActionWidgets();
@@ -1246,7 +1283,8 @@ QWidget *MainWindow::createActionWidget(int pairIndex)
 QString MainWindow::buildPairStateText(const FolderPairConfig &pairConfig) const
 {
     const QString enableText = pairConfig.isSyncEnabled ? tr("已启用") : tr("已暂停");
-    const QString statusText = pairConfig.statusText.isEmpty() ? tr("待同步") : pairConfig.statusText;
+    const QString rawStatusText = pairConfig.statusText.isEmpty() ? tr("待同步") : pairConfig.statusText;
+    const QString statusText = stripProgressSuffix(rawStatusText);
     return tr("%1 | %2").arg(enableText, statusText);
 }
 
