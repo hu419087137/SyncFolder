@@ -67,6 +67,7 @@ private:
     struct RunningSyncContext
     {
         QThread *thread = nullptr;
+        FolderSyncWorker *worker = nullptr;
         qint64 currentStep = 0;
         qint64 totalSteps = 1;
         QString reason;
@@ -111,6 +112,7 @@ private:
     void addPair();
     void editPair(int pairIndex);
     void syncPair(int pairIndex);
+    void cancelPairSync(int pairIndex);
     void togglePairSync(int pairIndex);
     QWidget *createActionWidget(int pairIndex);
     QString buildPairStateText(const FolderPairConfig &pairConfig) const;
@@ -133,5 +135,6 @@ private:
     QHash<int, QString> _pendingSyncReasons;
     bool _isMonitoring;
     bool _isFastCompareEnabled;
+    int _maxParallelSyncCount;
     QString _scheduledReason;
 };

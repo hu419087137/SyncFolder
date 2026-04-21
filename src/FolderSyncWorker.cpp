@@ -9,6 +9,7 @@
 #include <QHash>
 #include <QSaveFile>
 #include <QSet>
+#include <QThread>
 #include <QtGlobal>
 #include <QVector>
 
@@ -72,6 +73,8 @@ struct PlanStageProgress
     qint64 total = 0;
     QString text;
 };
+
+using CancelCallback = std::function<bool()>;
 
 QString normalizePath(const QString &path)
 {
@@ -250,6 +253,7 @@ void appendUniqueOperation(const SyncOperation &operation,
 FileCompareResult compareFileContent(const QFileInfo &sourceInfo,
                                      const QFileInfo &targetInfo,
                                      const std::function<void(qint64, qint64)> &progressCallback,
+                                     const CancelCallback &cancelCallback,
                                      QString *errorMessage)
 {
     if (!targetInfo.exists() || !targetInfo.isFile()) {
@@ -279,6 +283,13 @@ FileCompareResult compareFileContent(const QFileInfo &sourceInfo,
     }
 
     while (true) {
+        if (cancelCallback != nullptr && cancelCallback()) {
+            if (errorMessage != nullptr) {
+                *errorMessage = QObject::tr("用户取消同步。");
+            }
+            return FileCompareResult::E_Error;
+        }
+
         const qint64 comparedBytes = sourceFile.pos();
         if (progressCallback != nullptr && shouldReportByteProgress(comparedBytes, sourceInfo.size())) {
             progressCallback(comparedBytes, sourceInfo.size());
@@ -409,6 +420,7 @@ bool writeAll(QFileDevice *targetFile, const QByteArray &buffer, const QString &
 
 bool copyFileWithMetadata(const SyncOperation &operation,
                           const std::function<void(qint64, const QString &)> &progressCallback,
+                          const CancelCallback &cancelCallback,
                           QString *errorMessage)
 {
     const QFileInfo sourceInfo(operation.sourcePath);
@@ -443,6 +455,13 @@ bool copyFileWithMetadata(const SyncOperation &operation,
     qint64 copiedBytes = 0;
     qint64 lastReportedUnits = 0;
     while (true) {
+        if (cancelCallback != nullptr && cancelCallback()) {
+            if (errorMessage != nullptr) {
+                *errorMessage = QObject::tr("用户取消同步。");
+            }
+            return false;
+        }
+
         const QByteArray sourceChunk = sourceFile.read(kCopyProgressChunkSize);
         if (sourceChunk.isEmpty()) {
             if (sourceFile.error() != QFileDevice::NoError) {
@@ -496,6 +515,7 @@ bool collectSourceEntries(const QString &sourcePath,
                           QVector<SourceEntry> *sourceEntries,
                           QHash<QString, SyncEntryType> *sourceEntryTypes,
                           const std::function<void(const PlanStageProgress &)> &stageCallback,
+                          const CancelCallback &cancelCallback,
                           QString *errorMessage)
 {
     QDir sourceRoot(sourcePath);
@@ -504,6 +524,13 @@ bool collectSourceEntries(const QString &sourcePath,
                           QDirIterator::Subdirectories);
     qint64 collectedEntryCount = 0;
     while (iterator.hasNext()) {
+        if (cancelCallback != nullptr && cancelCallback()) {
+            if (errorMessage != nullptr) {
+                *errorMessage = QObject::tr("用户取消同步。");
+            }
+            return false;
+        }
+
         iterator.next();
 
         const QFileInfo fileInfo = iterator.fileInfo();
@@ -564,6 +591,7 @@ bool buildSyncPlan(const QString &sourcePath,
                    SyncPlanStats *planStats,
                    bool isFastCompareEnabled,
                    const std::function<void(const PlanStageProgress &)> &stageCallback,
+                   const CancelCallback &cancelCallback,
                    QString *errorMessage)
 {
     QVector<SourceEntry> sourceEntries;
@@ -575,6 +603,7 @@ bool buildSyncPlan(const QString &sourcePath,
                               &sourceEntries,
                               &sourceEntryTypes,
                               stageCallback,
+                              cancelCallback,
                               errorMessage)) {
         return false;
     }
@@ -595,6 +624,13 @@ bool buildSyncPlan(const QString &sourcePath,
                                 QDirIterator::Subdirectories);
     qint64 checkedTargetEntryCount = 0;
     while (targetIterator.hasNext()) {
+        if (cancelCallback != nullptr && cancelCallback()) {
+            if (errorMessage != nullptr) {
+                *errorMessage = QObject::tr("用户取消同步。");
+            }
+            return false;
+        }
+
         targetIterator.next();
         ++checkedTargetEntryCount;
 
@@ -671,6 +707,13 @@ bool buildSyncPlan(const QString &sourcePath,
     }
     qint64 comparedSourceEntryCount = 0;
     for (const SourceEntry &sourceEntry : sourceEntries) {
+        if (cancelCallback != nullptr && cancelCallback()) {
+            if (errorMessage != nullptr) {
+                *errorMessage = QObject::tr("用户取消同步。");
+            }
+            return false;
+        }
+
         ++comparedSourceEntryCount;
 
         const QString targetAbsolutePath = targetRoot.absoluteFilePath(sourceEntry.relativePath);
@@ -723,6 +766,7 @@ bool buildSyncPlan(const QString &sourcePath,
                                                                / static_cast<double>(totalBytes)),
                                                         100))});
                                        },
+                                       cancelCallback,
                                        &compareErrorMessage);
             }
             if (compareResult == FileCompareResult::E_Error) {
@@ -778,8 +822,16 @@ bool buildSyncPlan(const QString &sourcePath,
 
 bool executeOperation(const SyncOperation &operation,
                       const std::function<void(qint64, const QString &)> &progressCallback,
+                      const CancelCallback &cancelCallback,
                       QString *errorMessage)
 {
+    if (cancelCallback != nullptr && cancelCallback()) {
+        if (errorMessage != nullptr) {
+            *errorMessage = QObject::tr("用户取消同步。");
+        }
+        return false;
+    }
+
     switch (operation.type) {
     case SyncOperationType::E_RemoveFile:
         return removeFileAtPath(operation.targetPath, errorMessage);
@@ -788,7 +840,7 @@ bool executeOperation(const SyncOperation &operation,
     case SyncOperationType::E_CreateDirectory:
         return ensureDirectoryExists(operation.targetPath, errorMessage);
     case SyncOperationType::E_CopyFile:
-        return copyFileWithMetadata(operation, progressCallback, errorMessage);
+        return copyFileWithMetadata(operation, progressCallback, cancelCallback, errorMessage);
     }
 
     if (errorMessage != nullptr) {
@@ -853,11 +905,21 @@ FolderSyncWorker::FolderSyncWorker(QObject *parent)
 {
 }
 
+void FolderSyncWorker::slotCancelSync()
+{
+    _isCancelRequested.storeRelease(1);
+}
+
 void FolderSyncWorker::slotStartSync(const QString &sourcePath,
                                      const QString &targetPath,
                                      const QString &reason,
                                      bool isFastCompareEnabled)
 {
+    _isCancelRequested.storeRelease(0);
+    auto isCancelRequested = [this]() {
+        return _isCancelRequested.loadAcquire() != 0 || QThread::currentThread()->isInterruptionRequested();
+    };
+
     const QString normalizedSourcePath = normalizePath(sourcePath);
     const QString normalizedTargetPath = normalizePath(targetPath);
 
@@ -916,6 +978,7 @@ void FolderSyncWorker::slotStartSync(const QString &sourcePath,
                        [this](const PlanStageProgress &progress) {
                            emit sigSyncProgress(progress.current, progress.total, progress.text);
                        },
+                       isCancelRequested,
                        &errorMessage)) {
         emit sigLogMessage(errorMessage);
         emit sigSyncFinished(false, errorMessage);
@@ -943,6 +1006,13 @@ void FolderSyncWorker::slotStartSync(const QString &sourcePath,
 
     qint64 completedProgressUnits = 0;
     for (int index = 0; index < operations.size(); ++index) {
+        if (isCancelRequested()) {
+            const QString summary = QObject::tr("同步已取消，reason=%1").arg(reason);
+            emit sigLogMessage(summary);
+            emit sigSyncFinished(false, summary);
+            return;
+        }
+
         const SyncOperation &operation = operations.at(index);
         const QString currentItem = describeOperation(operation);
         emit sigSyncProgress(completedProgressUnits, totalProgressUnits, currentItem);
@@ -952,9 +1022,10 @@ void FolderSyncWorker::slotStartSync(const QString &sourcePath,
                               [this, completedProgressUnits, totalProgressUnits](qint64 operationProgressUnits,
                                                                                 const QString &progressItem) {
                                   emit sigSyncProgress(completedProgressUnits + operationProgressUnits,
-                                                       totalProgressUnits,
+                                                      totalProgressUnits,
                                                        progressItem);
                               },
+                              isCancelRequested,
                               &executeErrorMessage)) {
             const QString summary =
                 QObject::tr("同步失败，reason=%1，step=%2，error=%3")

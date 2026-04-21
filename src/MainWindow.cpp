@@ -4,6 +4,7 @@
 #include <QAbstractItemView>
 #include <QCheckBox>
 #include <QColor>
+#include <QComboBox>
 #include <QDateTime>
 #include <QDir>
 #include <QEvent>
@@ -351,7 +352,8 @@ MainWindow::MainWindow(QWidget *parent)
       _periodicCheckTimer(nullptr),
       _folderWatcher(nullptr),
       _isMonitoring(false),
-      _isFastCompareEnabled(true)
+      _isFastCompareEnabled(true),
+      _maxParallelSyncCount(kDefaultMaxParallelSyncCount)
 {
     buildUi();
 
@@ -544,6 +546,11 @@ void MainWindow::slotPeriodicCheck()
 void MainWindow::buildUi()
 {
     _ui->setupUi(this);
+    _ui->maxParallelSyncComboBox->addItem(tr("并发 1 组"), 1);
+    _ui->maxParallelSyncComboBox->addItem(tr("并发 2 组"), 2);
+    _ui->maxParallelSyncComboBox->addItem(tr("并发 3 组"), 3);
+    _ui->maxParallelSyncComboBox->addItem(tr("并发 4 组"), 4);
+    _ui->maxParallelSyncComboBox->setToolTip(tr("限制同步全部时同时运行的任务数，机械硬盘或移动盘建议 1-2。"));
     _ui->fastCompareCheckBox->setToolTip(
         tr("启用后，文件大小和修改时间一致时跳过全文读取；适合大文件多的目录。"));
 
@@ -585,6 +592,18 @@ void MainWindow::buildUi()
     connect(_ui->startMonitorButton, &QPushButton::clicked, this, &MainWindow::slotStartMonitoring);
     connect(_ui->stopMonitorButton, &QPushButton::clicked, this, &MainWindow::slotStopMonitoring);
     connect(_ui->syncAllPairsButton, &QPushButton::clicked, this, &MainWindow::slotSyncAllPairs);
+    connect(_ui->maxParallelSyncComboBox,
+            &QComboBox::currentIndexChanged,
+            this,
+            [this](int index) {
+                const int selectedCount = _ui->maxParallelSyncComboBox->itemData(index).toInt();
+                _maxParallelSyncCount = qBound(1, selectedCount, 4);
+                saveSettings();
+                appendLog(tr("已设置最大并发同步数：%1 组。").arg(_maxParallelSyncCount));
+                startQueuedSyncs();
+                refreshActionWidgets();
+                updateControlState();
+            });
     connect(_ui->fastCompareCheckBox, &QCheckBox::toggled, this, [this](bool checked) {
         _isFastCompareEnabled = checked;
         saveSettings();
@@ -610,6 +629,7 @@ void MainWindow::applyButtonStyles()
     _ui->startMonitorButton->setCursor(Qt::PointingHandCursor);
     _ui->stopMonitorButton->setCursor(Qt::PointingHandCursor);
     _ui->syncAllPairsButton->setCursor(Qt::PointingHandCursor);
+    _ui->maxParallelSyncComboBox->setCursor(Qt::PointingHandCursor);
     _ui->fastCompareCheckBox->setCursor(Qt::PointingHandCursor);
 }
 
@@ -617,6 +637,16 @@ void MainWindow::loadSettings()
 {
     QSettings settings(settingsFilePath(), QSettings::IniFormat);
     _isFastCompareEnabled = settings.value(QStringLiteral("syncOptions/fastCompareEnabled"), true).toBool();
+    _maxParallelSyncCount =
+        qBound(1, settings.value(QStringLiteral("syncOptions/maxParallelSyncCount"),
+                                 kDefaultMaxParallelSyncCount)
+                      .toInt(),
+               4);
+    {
+        const QSignalBlocker blocker(_ui->maxParallelSyncComboBox);
+        const int maxParallelIndex = _ui->maxParallelSyncComboBox->findData(_maxParallelSyncCount);
+        _ui->maxParallelSyncComboBox->setCurrentIndex(maxParallelIndex >= 0 ? maxParallelIndex : 1);
+    }
     {
         const QSignalBlocker blocker(_ui->fastCompareCheckBox);
         _ui->fastCompareCheckBox->setChecked(_isFastCompareEnabled);
@@ -655,6 +685,7 @@ void MainWindow::saveSettings() const
 {
     QSettings settings(settingsFilePath(), QSettings::IniFormat);
     settings.setValue(QStringLiteral("syncOptions/fastCompareEnabled"), _isFastCompareEnabled);
+    settings.setValue(QStringLiteral("syncOptions/maxParallelSyncCount"), _maxParallelSyncCount);
     settings.remove(QStringLiteral("folderPairs"));
     settings.beginWriteArray(QStringLiteral("folderPairs"));
     for (int index = 0; index < _folderPairConfigs.size(); ++index) {
@@ -961,6 +992,7 @@ void MainWindow::startPairSync(int pairIndex, const QString &reason)
     auto *worker = new FolderSyncWorker();
     RunningSyncContext syncContext;
     syncContext.thread = thread;
+    syncContext.worker = worker;
     syncContext.currentStep = 0;
     syncContext.totalSteps = 0;
     syncContext.reason = reason;
@@ -1080,9 +1112,10 @@ void MainWindow::handlePairSyncFinished(int pairIndex, bool success, const QStri
     _runningSyncContexts.remove(pairIndex);
 
     const QString pairText = buildPairDisplayText(_folderPairConfigs.at(pairIndex), pairIndex);
-    const QString statusText = success
-        ? (summary.contains(tr("无需同步")) ? tr("最近一次：已一致") : tr("最近一次：成功"))
-        : tr("最近一次：失败");
+    const QString statusText = summary.contains(tr("取消"))
+        ? tr("最近一次：已取消")
+        : (success ? (summary.contains(tr("无需同步")) ? tr("最近一次：已一致") : tr("最近一次：成功"))
+                   : tr("最近一次：失败"));
     updatePairStatus(pairIndex, statusText);
     updatePairProgress(pairIndex, 0, 1);
     appendLog(tr("并行同步完成：%1，result=%2").arg(pairText, success ? tr("成功") : tr("失败")));
@@ -1119,7 +1152,7 @@ int MainWindow::runningSyncCount() const
 
 int MainWindow::maxParallelSyncCount() const
 {
-    return kDefaultMaxParallelSyncCount;
+    return qBound(1, _maxParallelSyncCount, 4);
 }
 
 QVector<int> MainWindow::buildEnabledPairIndexes() const
@@ -1266,6 +1299,41 @@ void MainWindow::syncPair(int pairIndex)
         _folderPairConfigs.at(pairIndex).isSyncEnabled ? tr("手动同步单组") : tr("手动同步单组（已暂停自动同步）"));
 }
 
+void MainWindow::cancelPairSync(int pairIndex)
+{
+    if (pairIndex < 0 || pairIndex >= _folderPairConfigs.size()) {
+        return;
+    }
+
+    if (isPairSyncQueued(pairIndex)) {
+        _pendingSyncReasons.remove(pairIndex);
+        updatePairStatus(pairIndex, tr("已取消排队"));
+        updatePairProgress(pairIndex, 0, 1);
+        appendLog(tr("已取消排队同步：%1").arg(buildPairDisplayText(_folderPairConfigs.at(pairIndex), pairIndex)));
+        refreshActionWidgets();
+        updateControlState();
+        startQueuedSyncs();
+        return;
+    }
+
+    if (!isPairSyncRunning(pairIndex)) {
+        return;
+    }
+
+    RunningSyncContext &syncContext = _runningSyncContexts[pairIndex];
+    if (syncContext.thread != nullptr) {
+        syncContext.thread->requestInterruption();
+    }
+    if (syncContext.worker != nullptr) {
+        syncContext.worker->slotCancelSync();
+    }
+
+    updatePairStatus(pairIndex, tr("正在取消"));
+    appendLog(tr("已请求取消同步：%1").arg(buildPairDisplayText(_folderPairConfigs.at(pairIndex), pairIndex)));
+    refreshActionWidgets();
+    updateControlState();
+}
+
 void MainWindow::togglePairSync(int pairIndex)
 {
     if (pairIndex < 0 || pairIndex >= _folderPairConfigs.size()) {
@@ -1339,21 +1407,26 @@ QWidget *MainWindow::createActionWidget(int pairIndex)
     toggleButton->setToolTip(_folderPairConfigs.at(pairIndex).isSyncEnabled ? tr("暂停这一组的自动同步和“同步全部”")
                                                                             : tr("恢复这一组的自动同步和“同步全部”"));
     if (isCurrentPairRunning) {
-        syncButton->setText(tr("同步中"));
-        syncButton->setToolTip(tr("当前这一组正在同步中"));
+        syncButton->setText(tr("取消"));
+        syncButton->setToolTip(tr("请求取消当前同步任务"));
     } else if (isCurrentPairQueued) {
-        syncButton->setText(tr("排队中"));
-        syncButton->setToolTip(tr("当前这一组已加入同步队列，等待空闲并发名额"));
+        syncButton->setText(tr("取消排队"));
+        syncButton->setToolTip(tr("从同步队列中移除这一组"));
     }
 
     editButton->setEnabled(!isCurrentPairBusy);
-    syncButton->setEnabled(!isCurrentPairBusy);
+    syncButton->setEnabled(true);
     toggleButton->setEnabled(!isCurrentPairBusy);
 
     connect(editButton, &QPushButton::clicked, container, [this, pairIndex]() {
         editPair(pairIndex);
     });
     connect(syncButton, &QPushButton::clicked, container, [this, pairIndex]() {
+        if (isPairSyncRunning(pairIndex) || isPairSyncQueued(pairIndex)) {
+            cancelPairSync(pairIndex);
+            return;
+        }
+
         syncPair(pairIndex);
     });
     connect(toggleButton, &QPushButton::clicked, container, [this, pairIndex]() {

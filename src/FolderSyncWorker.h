@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QAtomicInteger>
 #include <QObject>
 
 /**
@@ -31,6 +32,14 @@ public slots:
                        const QString &targetPath,
                        const QString &reason,
                        bool isFastCompareEnabled);
+
+    /**
+     * @brief 请求取消当前同步任务。
+     *
+     * 取消请求会在扫描、比对、复制或步骤切换时被后台线程检查，
+     * 已经提交完成的文件操作不会回滚。
+     */
+    void slotCancelSync();
 
 signals:
     /**
@@ -70,4 +79,7 @@ signals:
      * @param message 日志内容。
      */
     void sigLogMessage(const QString &message);
+
+private:
+    QAtomicInteger<int> _isCancelRequested = 0;
 };
