@@ -13,6 +13,7 @@
 #include <QMessageBox>
 #include <QPainter>
 #include <QPushButton>
+#include <QRectF>
 #include <QSet>
 #include <QSettings>
 #include <QSignalBlocker>
@@ -183,15 +184,19 @@ public:
         QStyle *style = widget != nullptr ? widget->style() : QApplication::style();
 
         const QString text = index.data(Qt::DisplayRole).toString();
-        const int progressValue = index.data(E_ProgressValueRole).toInt();
-        const int progressMaximum = qMax(1, index.data(E_ProgressMaximumRole).toInt());
+        const qint64 rawProgressMaximum = index.data(E_ProgressMaximumRole).toLongLong();
+        const bool isBusyProgress = rawProgressMaximum <= 0;
+        const qint64 progressMaximum = isBusyProgress ? 0 : rawProgressMaximum;
+        const qint64 progressValue = isBusyProgress
+            ? 0
+            : qBound<qint64>(0, index.data(E_ProgressValueRole).toLongLong(), progressMaximum);
         const bool isSyncEnabled = index.data(E_IsSyncEnabledRole).toBool();
         const QColor progressColor = buildProgressBarColor(text, isSyncEnabled, viewOption.palette);
         const QColor textColor = option.state & QStyle::State_Selected
             ? viewOption.palette.color(QPalette::HighlightedText)
             : buildStatusTextColor(text, isSyncEnabled, viewOption.palette);
         const QRect contentRect = option.rect.adjusted(6, 4, -6, -4);
-        const bool shouldShowPercent = progressMaximum > 1 || progressValue > 0;
+        const bool shouldShowPercent = !isBusyProgress && (progressMaximum > 1 || progressValue > 0);
         const int progressWidth = qMin(110, qMax(82, contentRect.width() / 4));
         const int percentWidth = shouldShowPercent ? 42 : 0;
         const int progressHeight = 10;
@@ -199,7 +204,11 @@ public:
         const QRect progressRect(contentRect.left(), progressTop, progressWidth, progressHeight);
         const QRect percentRect(progressRect.right() + 6, contentRect.top(), percentWidth, contentRect.height());
         const QRect textRect = contentRect.adjusted(progressWidth + percentWidth + 12, 0, 0, 0);
-        const int percentValue = qBound(0, qRound(progressValue * 100.0 / progressMaximum), 100);
+        const int percentValue = shouldShowPercent
+            ? qBound(0,
+                     qRound(static_cast<double>(progressValue) * 100.0 / static_cast<double>(progressMaximum)),
+                     100)
+            : 0;
         const QString percentText = QStringLiteral("%1%").arg(percentValue);
 
         painter->save();
@@ -219,9 +228,19 @@ public:
         painter->setBrush(Qt::NoBrush);
         painter->drawRoundedRect(progressTrackRect, 4, 4);
 
-        if (progressValue > 0) {
+        if (isBusyProgress) {
+            QRectF busyFillRect = progressTrackRect.adjusted(1.0, 1.0, -1.0, -1.0);
+            const qreal busyWidth = qMin(progressTrackRect.width(),
+                                         qMax<qreal>(18.0, progressTrackRect.width() * 0.42));
+            busyFillRect.setWidth(busyWidth);
+            painter->setPen(Qt::NoPen);
+            painter->setBrush(QColor(progressColor.red(), progressColor.green(), progressColor.blue(), 170));
+            painter->drawRoundedRect(busyFillRect, 6, 6);
+        } else if (progressValue > 0) {
             QRectF progressFillRect = progressTrackRect;
-            progressFillRect.setWidth(progressTrackRect.width() * progressValue / progressMaximum);
+            const qreal fillWidth = progressTrackRect.width() * static_cast<qreal>(progressValue)
+                / static_cast<qreal>(progressMaximum);
+            progressFillRect.setWidth(qMax<qreal>(1.0, fillWidth));
             painter->setPen(Qt::NoPen);
             painter->setBrush(QColor(progressColor.red(), progressColor.green(), progressColor.blue(), 200));
             painter->drawRoundedRect(progressFillRect, 6, 6);
@@ -449,6 +468,13 @@ void MainWindow::slotSyncAllPairs()
         appendLog(errorMessage);
         return;
     }
+
+    const QVector<int> enabledPairIndexes = buildEnabledPairIndexes();
+    const int disabledPairCount = _folderPairConfigs.size() - enabledPairIndexes.size();
+    appendLog(tr("手动同步全部：本次纳入 %1 组已启用同步对，跳过 %2 组已暂停同步对。")
+                  .arg(enabledPairIndexes.size())
+                  .arg(disabledPairCount));
+    appendLog(tr("手动同步全部目录：%1").arg(buildPairListSummaryText(enabledPairIndexes)));
 
     requestSyncAll(tr("手动同步全部已启用同步对"));
 }
@@ -736,10 +762,12 @@ void MainWindow::refreshStatusCell(int pairIndex)
     }
 
     const FolderPairConfig &pairConfig = _folderPairConfigs.at(pairIndex);
-    const int progressMaximum = qMax(1, pairConfig.progressMaximum);
-    const int progressValue = qBound(0, pairConfig.progressValue, progressMaximum);
+    const qint64 progressMaximum = pairConfig.progressMaximum <= 0 ? 0 : pairConfig.progressMaximum;
+    const qint64 progressValue = progressMaximum <= 0 ? 0 : qBound<qint64>(0, pairConfig.progressValue, progressMaximum);
     const QString stateText = buildPairStateText(pairConfig);
-    const QString tooltipText = tr("%1\n进度：%2/%3").arg(stateText).arg(progressValue).arg(progressMaximum);
+    const QString tooltipText = progressMaximum > 0
+        ? tr("%1\n进度：%2/%3").arg(stateText).arg(progressValue).arg(progressMaximum)
+        : tr("%1\n进度：处理中").arg(stateText);
 
     statusItem->setData(stateText, Qt::DisplayRole);
     statusItem->setData(progressValue, E_ProgressValueRole);
@@ -758,15 +786,20 @@ void MainWindow::updatePairStatus(int pairIndex, const QString &statusText)
     refreshStatusCell(pairIndex);
 }
 
-void MainWindow::updatePairProgress(int pairIndex, int progressValue, int progressMaximum)
+void MainWindow::updatePairProgress(int pairIndex, qint64 progressValue, qint64 progressMaximum)
 {
     if (pairIndex < 0 || pairIndex >= _folderPairConfigs.size()) {
         return;
     }
 
-    _folderPairConfigs[pairIndex].progressMaximum = qMax(1, progressMaximum);
-    _folderPairConfigs[pairIndex].progressValue =
-        qBound(0, progressValue, _folderPairConfigs[pairIndex].progressMaximum);
+    if (progressMaximum <= 0) {
+        _folderPairConfigs[pairIndex].progressMaximum = 0;
+        _folderPairConfigs[pairIndex].progressValue = 0;
+    } else {
+        _folderPairConfigs[pairIndex].progressMaximum = progressMaximum;
+        _folderPairConfigs[pairIndex].progressValue =
+            qBound<qint64>(0, progressValue, _folderPairConfigs[pairIndex].progressMaximum);
+    }
     refreshStatusCell(pairIndex);
 }
 
@@ -784,14 +817,20 @@ void MainWindow::requestSyncByIndexes(const QVector<int> &pairIndexes, const QSt
 
     int startedPairCount = 0;
     int pendingPairCount = 0;
+    QVector<int> startedPairIndexes;
+    QVector<int> pendingPairIndexes;
+    startedPairIndexes.reserve(normalizedIndexes.size());
+    pendingPairIndexes.reserve(normalizedIndexes.size());
     for (int pairIndex : normalizedIndexes) {
         if (isPairSyncRunning(pairIndex)) {
             _pendingSyncReasons.insert(pairIndex, reason);
             ++pendingPairCount;
+            pendingPairIndexes.append(pairIndex);
             continue;
         }
         startPairSync(pairIndex, reason);
         ++startedPairCount;
+        startedPairIndexes.append(pairIndex);
     }
 
     if (startedPairCount > 0 || pendingPairCount > 0) {
@@ -799,6 +838,12 @@ void MainWindow::requestSyncByIndexes(const QVector<int> &pairIndexes, const QSt
                       .arg(startedPairCount)
                       .arg(pendingPairCount)
                       .arg(reason));
+        if (!startedPairIndexes.isEmpty()) {
+            appendLog(tr("已立即启动：%1").arg(buildPairListSummaryText(startedPairIndexes)));
+        }
+        if (!pendingPairIndexes.isEmpty()) {
+            appendLog(tr("已加入待补同步队列：%1").arg(buildPairListSummaryText(pendingPairIndexes)));
+        }
     }
 
     refreshActionWidgets();
@@ -817,7 +862,7 @@ void MainWindow::startPairSync(int pairIndex, const QString &reason)
     RunningSyncContext syncContext;
     syncContext.thread = thread;
     syncContext.currentStep = 0;
-    syncContext.totalSteps = 1;
+    syncContext.totalSteps = 0;
     syncContext.reason = reason;
     _runningSyncContexts.insert(pairIndex, syncContext);
 
@@ -827,7 +872,7 @@ void MainWindow::startPairSync(int pairIndex, const QString &reason)
     connect(worker,
             &FolderSyncWorker::sigSyncStarted,
             this,
-            [this, pairIndex](int totalSteps,
+            [this, pairIndex](qint64 totalSteps,
                               int removeFileCount,
                               int addFileCount,
                               int updateFileCount,
@@ -843,7 +888,7 @@ void MainWindow::startPairSync(int pairIndex, const QString &reason)
     connect(worker,
             &FolderSyncWorker::sigSyncProgress,
             this,
-            [this, pairIndex](int currentStep, int totalSteps, const QString &currentItem) {
+            [this, pairIndex](qint64 currentStep, qint64 totalSteps, const QString &currentItem) {
                 handlePairSyncProgress(pairIndex, currentStep, totalSteps, currentItem);
             },
             Qt::QueuedConnection);
@@ -865,8 +910,8 @@ void MainWindow::startPairSync(int pairIndex, const QString &reason)
             },
             Qt::QueuedConnection);
 
-    updatePairProgress(pairIndex, 0, 1);
-    updatePairStatus(pairIndex, tr("准备中"));
+    updatePairProgress(pairIndex, 0, 0);
+    updatePairStatus(pairIndex, tr("准备扫描"));
     refreshActionWidgets();
     updateControlState();
 
@@ -880,7 +925,7 @@ void MainWindow::startPairSync(int pairIndex, const QString &reason)
 }
 
 void MainWindow::handlePairSyncStarted(int pairIndex,
-                                       int totalSteps,
+                                       qint64 totalSteps,
                                        int removeFileCount,
                                        int addFileCount,
                                        int updateFileCount,
@@ -892,7 +937,7 @@ void MainWindow::handlePairSyncStarted(int pairIndex,
 
     RunningSyncContext &syncContext = _runningSyncContexts[pairIndex];
     syncContext.currentStep = 0;
-    syncContext.totalSteps = qMax(1, totalSteps);
+    syncContext.totalSteps = qMax<qint64>(1, totalSteps);
     syncContext.reason = reason;
 
     updatePairStatus(pairIndex,
@@ -900,7 +945,7 @@ void MainWindow::handlePairSyncStarted(int pairIndex,
                          .arg(removeFileCount)
                          .arg(addFileCount)
                          .arg(updateFileCount));
-    updatePairProgress(pairIndex, 0, qMax(1, totalSteps));
+    updatePairProgress(pairIndex, 0, qMax<qint64>(1, totalSteps));
     appendLog(tr("开始并行同步：%1，待删除文件 %2，待新增文件 %3，待同步文件 %4。")
                   .arg(buildPairDisplayText(_folderPairConfigs.at(pairIndex), pairIndex))
                   .arg(removeFileCount)
@@ -908,7 +953,10 @@ void MainWindow::handlePairSyncStarted(int pairIndex,
                   .arg(updateFileCount));
 }
 
-void MainWindow::handlePairSyncProgress(int pairIndex, int currentStep, int totalSteps, const QString &currentItem)
+void MainWindow::handlePairSyncProgress(int pairIndex,
+                                        qint64 currentStep,
+                                        qint64 totalSteps,
+                                        const QString &currentItem)
 {
     if (pairIndex < 0 || pairIndex >= _folderPairConfigs.size() || !_runningSyncContexts.contains(pairIndex)) {
         return;
@@ -916,7 +964,7 @@ void MainWindow::handlePairSyncProgress(int pairIndex, int currentStep, int tota
 
     RunningSyncContext &syncContext = _runningSyncContexts[pairIndex];
     syncContext.currentStep = currentStep;
-    syncContext.totalSteps = qMax(1, totalSteps);
+    syncContext.totalSteps = totalSteps <= 0 ? 0 : qMax<qint64>(1, totalSteps);
     updatePairProgress(pairIndex, currentStep, totalSteps);
     updatePairStatus(pairIndex, currentItem);
 }
@@ -1208,6 +1256,25 @@ QString MainWindow::buildPairDisplayText(const FolderPairConfig &pairConfig, int
         .arg(pairIndex + 1)
         .arg(QDir::toNativeSeparators(pairConfig.sourcePath))
         .arg(QDir::toNativeSeparators(pairConfig.targetPath));
+}
+
+QString MainWindow::buildPairListSummaryText(const QVector<int> &pairIndexes) const
+{
+    if (pairIndexes.isEmpty()) {
+        return tr("无");
+    }
+
+    QStringList pairTexts;
+    pairTexts.reserve(pairIndexes.size());
+    for (int pairIndex : pairIndexes) {
+        if (pairIndex < 0 || pairIndex >= _folderPairConfigs.size()) {
+            continue;
+        }
+
+        pairTexts.append(buildPairDisplayText(_folderPairConfigs.at(pairIndex), pairIndex));
+    }
+
+    return pairTexts.isEmpty() ? tr("无") : pairTexts.join(tr("； "));
 }
 
 QString MainWindow::normalizePath(const QString &path) const

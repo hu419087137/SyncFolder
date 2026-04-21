@@ -31,13 +31,16 @@ public slots:
 signals:
     /**
      * @brief 同步计划已生成，准备开始执行。
-     * @param totalSteps 本次需要执行的总步骤数。
+     * @param totalProgressUnits 本次同步总进度单位数。
+     *
+     * 删除/创建目录通常只占 1 个进度单位，大文件复制会被拆成多个进度单位，
+     * 这样界面可以更及时地反馈长时间复制任务的执行进度。
      * @param removeFileCount 备份前需要删除的文件数量。
      * @param addFileCount 备份前需要新增的文件数量。
      * @param updateFileCount 备份前需要同步覆盖的文件数量。
      * @param reason 触发同步的原因。
      */
-    void sigSyncStarted(int totalSteps,
+    void sigSyncStarted(qint64 totalProgressUnits,
                         int removeFileCount,
                         int addFileCount,
                         int updateFileCount,
@@ -45,11 +48,11 @@ signals:
 
     /**
      * @brief 当前步骤进度发生变化。
-     * @param currentStep 当前步骤序号，从 1 开始。
-     * @param totalSteps 本次同步总步骤数。
+     * @param currentProgressUnits 当前已完成的进度单位数。
+     * @param totalProgressUnits 本次同步总进度单位数；当值小于等于 0 时，表示当前处于扫描或比对中的忙碌态。
      * @param currentItem 当前正在处理的对象说明。
      */
-    void sigSyncProgress(int currentStep, int totalSteps, const QString &currentItem);
+    void sigSyncProgress(qint64 currentProgressUnits, qint64 totalProgressUnits, const QString &currentItem);
 
     /**
      * @brief 一次同步流程已经结束。

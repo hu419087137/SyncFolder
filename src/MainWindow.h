@@ -60,15 +60,15 @@ private:
         QString targetPath;
         QString statusText;
         bool isSyncEnabled = true;
-        int progressValue = 0;
-        int progressMaximum = 1;
+        qint64 progressValue = 0;
+        qint64 progressMaximum = 1;
     };
 
     struct RunningSyncContext
     {
         QThread *thread = nullptr;
-        int currentStep = 0;
-        int totalSteps = 1;
+        qint64 currentStep = 0;
+        qint64 totalSteps = 1;
         QString reason;
     };
 
@@ -84,17 +84,20 @@ private:
     void removePairIndexFromQueues(int pairIndex);
     void refreshStatusCell(int pairIndex);
     void updatePairStatus(int pairIndex, const QString &statusText);
-    void updatePairProgress(int pairIndex, int progressValue, int progressMaximum);
+    void updatePairProgress(int pairIndex, qint64 progressValue, qint64 progressMaximum);
     void requestSyncAll(const QString &reason);
     void requestSyncByIndexes(const QVector<int> &pairIndexes, const QString &reason);
     void startPairSync(int pairIndex, const QString &reason);
     void handlePairSyncStarted(int pairIndex,
-                               int totalSteps,
+                               qint64 totalSteps,
                                int removeFileCount,
                                int addFileCount,
                                int updateFileCount,
                                const QString &reason);
-    void handlePairSyncProgress(int pairIndex, int currentStep, int totalSteps, const QString &currentItem);
+    void handlePairSyncProgress(int pairIndex,
+                                qint64 currentStep,
+                                qint64 totalSteps,
+                                const QString &currentItem);
     void handlePairSyncFinished(int pairIndex, bool success, const QString &summary);
     bool isPairSyncRunning(int pairIndex) const;
     int runningSyncCount() const;
@@ -109,6 +112,7 @@ private:
     QWidget *createActionWidget(int pairIndex);
     QString buildPairStateText(const FolderPairConfig &pairConfig) const;
     QString buildPairDisplayText(const FolderPairConfig &pairConfig, int pairIndex) const;
+    QString buildPairListSummaryText(const QVector<int> &pairIndexes) const;
     QString normalizePath(const QString &path) const;
     bool editPairConfig(FolderPairConfig *pairConfig, int ignoredIndex, const QString &windowTitle) const;
     bool validatePairConfig(const FolderPairConfig &pairConfig,
