@@ -94,7 +94,8 @@ private:
     void updatePairProgress(int pairIndex, qint64 progressValue, qint64 progressMaximum);
     void requestSyncAll(const QString &reason);
     void requestSyncByIndexes(const QVector<int> &pairIndexes, const QString &reason);
-    void startPairSync(int pairIndex, const QString &reason);
+    bool startPairSync(int pairIndex, const QString &reason, bool shouldKickoffImmediately = true);
+    void kickoffPairSync(int pairIndex);
     void handlePairSyncStarted(int pairIndex,
                                qint64 totalSteps,
                                int removeFileCount,

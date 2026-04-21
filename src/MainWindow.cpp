@@ -47,7 +47,8 @@ constexpr int kPathColumnMinimumWidth = 220;
 constexpr int kStatusColumnWidth = 360;
 constexpr int kActionColumnWidth = 270;
 constexpr int kTableRowHeight = 48;
-constexpr int kDefaultMaxParallelSyncCount = 2;
+constexpr int kAutoMaxParallelSyncCount = 0;
+constexpr int kDefaultMaxParallelSyncCount = kAutoMaxParallelSyncCount;
 constexpr int kDefaultCompareMode = 1;
 constexpr qint64 kProgressUiUpdateIntervalMs = 300;
 
@@ -547,11 +548,13 @@ void MainWindow::slotPeriodicCheck()
 void MainWindow::buildUi()
 {
     _ui->setupUi(this);
+    _ui->maxParallelSyncComboBox->addItem(tr("并发自动"), kAutoMaxParallelSyncCount);
     _ui->maxParallelSyncComboBox->addItem(tr("并发 1 组"), 1);
     _ui->maxParallelSyncComboBox->addItem(tr("并发 2 组"), 2);
     _ui->maxParallelSyncComboBox->addItem(tr("并发 3 组"), 3);
     _ui->maxParallelSyncComboBox->addItem(tr("并发 4 组"), 4);
-    _ui->maxParallelSyncComboBox->setToolTip(tr("限制同步全部时同时运行的任务数，机械硬盘或移动盘建议 1-2。"));
+    _ui->maxParallelSyncComboBox->setToolTip(
+        tr("自动模式会尽量让同步全部中的任务同时起跑；机械硬盘或移动盘可手动改成 1-2。"));
     _ui->compareModeComboBox->addItem(tr("严格比对"), FolderSyncWorker::E_StrictCompare);
     _ui->compareModeComboBox->addItem(tr("快速比对"), FolderSyncWorker::E_FastCompare);
     _ui->compareModeComboBox->addItem(tr("极速比对"), FolderSyncWorker::E_TurboCompare);
@@ -601,9 +604,12 @@ void MainWindow::buildUi()
             this,
             [this](int index) {
                 const int selectedCount = _ui->maxParallelSyncComboBox->itemData(index).toInt();
-                _maxParallelSyncCount = qBound(1, selectedCount, 4);
+                _maxParallelSyncCount = selectedCount == kAutoMaxParallelSyncCount ? kAutoMaxParallelSyncCount
+                                                                                  : qBound(1, selectedCount, 4);
                 saveSettings();
-                appendLog(tr("已设置最大并发同步数：%1 组。").arg(_maxParallelSyncCount));
+                appendLog(_maxParallelSyncCount == kAutoMaxParallelSyncCount
+                              ? tr("已设置最大并发同步数：自动。")
+                              : tr("已设置最大并发同步数：%1 组。").arg(_maxParallelSyncCount));
                 startQueuedSyncs();
                 refreshActionWidgets();
                 updateControlState();
@@ -651,14 +657,14 @@ void MainWindow::loadSettings()
                           _compareMode,
                           static_cast<int>(FolderSyncWorker::E_TurboCompare));
     _maxParallelSyncCount =
-        qBound(1, settings.value(QStringLiteral("syncOptions/maxParallelSyncCount"),
-                                 kDefaultMaxParallelSyncCount)
-                      .toInt(),
-               4);
+        settings.value(QStringLiteral("syncOptions/maxParallelSyncCount"), kDefaultMaxParallelSyncCount).toInt();
+    if (_maxParallelSyncCount != kAutoMaxParallelSyncCount) {
+        _maxParallelSyncCount = qBound(1, _maxParallelSyncCount, 4);
+    }
     {
         const QSignalBlocker blocker(_ui->maxParallelSyncComboBox);
         const int maxParallelIndex = _ui->maxParallelSyncComboBox->findData(_maxParallelSyncCount);
-        _ui->maxParallelSyncComboBox->setCurrentIndex(maxParallelIndex >= 0 ? maxParallelIndex : 1);
+        _ui->maxParallelSyncComboBox->setCurrentIndex(maxParallelIndex >= 0 ? maxParallelIndex : 0);
     }
     {
         const QSignalBlocker blocker(_ui->compareModeComboBox);
@@ -868,6 +874,8 @@ void MainWindow::startQueuedSyncs()
     std::sort(pendingPairIndexes.begin(), pendingPairIndexes.end());
 
     int startedPairCount = 0;
+    QVector<int> startedPairIndexes;
+    startedPairIndexes.reserve(availableSyncCount);
     for (int pairIndex : pendingPairIndexes) {
         if (startedPairCount >= availableSyncCount) {
             break;
@@ -878,8 +886,14 @@ void MainWindow::startQueuedSyncs()
         }
 
         const QString pendingReason = _pendingSyncReasons.take(pairIndex);
-        startPairSync(pairIndex, pendingReason);
-        ++startedPairCount;
+        if (startPairSync(pairIndex, pendingReason, false)) {
+            startedPairIndexes.append(pairIndex);
+            ++startedPairCount;
+        }
+    }
+
+    for (int pairIndex : startedPairIndexes) {
+        kickoffPairSync(pairIndex);
     }
 }
 
@@ -972,11 +986,18 @@ void MainWindow::requestSyncByIndexes(const QVector<int> &pairIndexes, const QSt
         }
     }
 
+    QVector<int> startedPairIndexes;
+    startedPairIndexes.reserve(readyPairIndexes.size());
     for (int pairIndex : readyPairIndexes) {
-        startPairSync(pairIndex, reason);
+        if (startPairSync(pairIndex, reason, false)) {
+            startedPairIndexes.append(pairIndex);
+        }
+    }
+    for (int pairIndex : startedPairIndexes) {
+        kickoffPairSync(pairIndex);
     }
 
-    const int startedPairCount = readyPairIndexes.size();
+    const int startedPairCount = startedPairIndexes.size();
     const int pendingPairCount = pendingPairIndexes.size();
 
     if (startedPairCount > 0 || pendingPairCount > 0) {
@@ -984,8 +1005,8 @@ void MainWindow::requestSyncByIndexes(const QVector<int> &pairIndexes, const QSt
                       .arg(startedPairCount)
                       .arg(pendingPairCount)
                       .arg(reason));
-        if (!readyPairIndexes.isEmpty()) {
-            appendLog(tr("已立即启动：%1").arg(buildPairListSummaryText(readyPairIndexes)));
+        if (!startedPairIndexes.isEmpty()) {
+            appendLog(tr("已立即启动：%1").arg(buildPairListSummaryText(startedPairIndexes)));
         }
     }
     if (pendingPairCount > 0) {
@@ -997,10 +1018,10 @@ void MainWindow::requestSyncByIndexes(const QVector<int> &pairIndexes, const QSt
     updateControlState();
 }
 
-void MainWindow::startPairSync(int pairIndex, const QString &reason)
+bool MainWindow::startPairSync(int pairIndex, const QString &reason, bool shouldKickoffImmediately)
 {
     if (pairIndex < 0 || pairIndex >= _folderPairConfigs.size() || isPairSyncRunning(pairIndex)) {
-        return;
+        return false;
     }
 
     const FolderPairConfig &pairConfig = _folderPairConfigs.at(pairIndex);
@@ -1065,12 +1086,32 @@ void MainWindow::startPairSync(int pairIndex, const QString &reason)
     updateControlState();
 
     thread->start();
-    QMetaObject::invokeMethod(worker,
+    if (shouldKickoffImmediately) {
+        kickoffPairSync(pairIndex);
+    }
+    return true;
+}
+
+void MainWindow::kickoffPairSync(int pairIndex)
+{
+    if (!_runningSyncContexts.contains(pairIndex)
+        || pairIndex < 0
+        || pairIndex >= _folderPairConfigs.size()) {
+        return;
+    }
+
+    RunningSyncContext &syncContext = _runningSyncContexts[pairIndex];
+    if (syncContext.worker == nullptr) {
+        return;
+    }
+
+    const FolderPairConfig &pairConfig = _folderPairConfigs.at(pairIndex);
+    QMetaObject::invokeMethod(syncContext.worker,
                               "slotStartSync",
                               Qt::QueuedConnection,
                               Q_ARG(QString, pairConfig.sourcePath),
                               Q_ARG(QString, pairConfig.targetPath),
-                              Q_ARG(QString, reason),
+                              Q_ARG(QString, syncContext.reason),
                               Q_ARG(FolderSyncWorker::CompareMode,
                                     static_cast<FolderSyncWorker::CompareMode>(_compareMode)));
 }
@@ -1187,6 +1228,10 @@ int MainWindow::runningSyncCount() const
 
 int MainWindow::maxParallelSyncCount() const
 {
+    if (_maxParallelSyncCount == kAutoMaxParallelSyncCount) {
+        return qMax(1, buildEnabledPairIndexes().size());
+    }
+
     return qBound(1, _maxParallelSyncCount, 4);
 }
 
