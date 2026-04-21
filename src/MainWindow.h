@@ -82,6 +82,7 @@ private:
     void updateControlState();
     void appendLog(const QString &message);
     void removePairIndexFromQueues(int pairIndex);
+    void startQueuedSyncs();
     void refreshStatusCell(int pairIndex);
     void updatePairStatus(int pairIndex, const QString &statusText);
     void updatePairProgress(int pairIndex, qint64 progressValue, qint64 progressMaximum);
@@ -100,7 +101,9 @@ private:
                                 const QString &currentItem);
     void handlePairSyncFinished(int pairIndex, bool success, const QString &summary);
     bool isPairSyncRunning(int pairIndex) const;
+    bool isPairSyncQueued(int pairIndex) const;
     int runningSyncCount() const;
+    int maxParallelSyncCount() const;
     QVector<int> buildEnabledPairIndexes() const;
     QVector<int> normalizePairIndexes(const QVector<int> &pairIndexes) const;
     int currentSelectedPairIndex() const;
@@ -129,5 +132,6 @@ private:
     QHash<int, RunningSyncContext> _runningSyncContexts;
     QHash<int, QString> _pendingSyncReasons;
     bool _isMonitoring;
+    bool _isFastCompareEnabled;
     QString _scheduledReason;
 };

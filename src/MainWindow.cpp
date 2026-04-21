@@ -2,6 +2,7 @@
 
 #include <QApplication>
 #include <QAbstractItemView>
+#include <QCheckBox>
 #include <QColor>
 #include <QDateTime>
 #include <QDir>
@@ -46,6 +47,7 @@ constexpr int kPathColumnMinimumWidth = 220;
 constexpr int kStatusColumnWidth = 360;
 constexpr int kActionColumnWidth = 270;
 constexpr int kTableRowHeight = 48;
+constexpr int kDefaultMaxParallelSyncCount = 2;
 
 enum class ButtonStyleKind
 {
@@ -348,7 +350,8 @@ MainWindow::MainWindow(QWidget *parent)
       _debounceTimer(nullptr),
       _periodicCheckTimer(nullptr),
       _folderWatcher(nullptr),
-      _isMonitoring(false)
+      _isMonitoring(false),
+      _isFastCompareEnabled(true)
 {
     buildUi();
 
@@ -541,6 +544,8 @@ void MainWindow::slotPeriodicCheck()
 void MainWindow::buildUi()
 {
     _ui->setupUi(this);
+    _ui->fastCompareCheckBox->setToolTip(
+        tr("启用后，文件大小和修改时间一致时跳过全文读取；适合大文件多的目录。"));
 
     _pairTableModel = new QStandardItemModel(this);
     _pairTableModel->setColumnCount(4);
@@ -580,6 +585,11 @@ void MainWindow::buildUi()
     connect(_ui->startMonitorButton, &QPushButton::clicked, this, &MainWindow::slotStartMonitoring);
     connect(_ui->stopMonitorButton, &QPushButton::clicked, this, &MainWindow::slotStopMonitoring);
     connect(_ui->syncAllPairsButton, &QPushButton::clicked, this, &MainWindow::slotSyncAllPairs);
+    connect(_ui->fastCompareCheckBox, &QCheckBox::toggled, this, [this](bool checked) {
+        _isFastCompareEnabled = checked;
+        saveSettings();
+        appendLog(checked ? tr("已启用快速比对模式。") : tr("已关闭快速比对模式。"));
+    });
 }
 
 void MainWindow::applyButtonStyles()
@@ -600,11 +610,18 @@ void MainWindow::applyButtonStyles()
     _ui->startMonitorButton->setCursor(Qt::PointingHandCursor);
     _ui->stopMonitorButton->setCursor(Qt::PointingHandCursor);
     _ui->syncAllPairsButton->setCursor(Qt::PointingHandCursor);
+    _ui->fastCompareCheckBox->setCursor(Qt::PointingHandCursor);
 }
 
 void MainWindow::loadSettings()
 {
     QSettings settings(settingsFilePath(), QSettings::IniFormat);
+    _isFastCompareEnabled = settings.value(QStringLiteral("syncOptions/fastCompareEnabled"), true).toBool();
+    {
+        const QSignalBlocker blocker(_ui->fastCompareCheckBox);
+        _ui->fastCompareCheckBox->setChecked(_isFastCompareEnabled);
+    }
+
     const int pairCount = settings.beginReadArray(QStringLiteral("folderPairs"));
     for (int index = 0; index < pairCount; ++index) {
         settings.setArrayIndex(index);
@@ -637,6 +654,7 @@ void MainWindow::loadSettings()
 void MainWindow::saveSettings() const
 {
     QSettings settings(settingsFilePath(), QSettings::IniFormat);
+    settings.setValue(QStringLiteral("syncOptions/fastCompareEnabled"), _isFastCompareEnabled);
     settings.remove(QStringLiteral("folderPairs"));
     settings.beginWriteArray(QStringLiteral("folderPairs"));
     for (int index = 0; index < _folderPairConfigs.size(); ++index) {
@@ -784,6 +802,40 @@ void MainWindow::removePairIndexFromQueues(int pairIndex)
     _pendingSyncReasons = shiftedReasons;
 }
 
+void MainWindow::startQueuedSyncs()
+{
+    if (_pendingSyncReasons.isEmpty()) {
+        return;
+    }
+
+    const int availableSyncCount = maxParallelSyncCount() - runningSyncCount();
+    if (availableSyncCount <= 0) {
+        return;
+    }
+
+    QVector<int> pendingPairIndexes;
+    pendingPairIndexes.reserve(_pendingSyncReasons.size());
+    for (auto it = _pendingSyncReasons.cbegin(); it != _pendingSyncReasons.cend(); ++it) {
+        pendingPairIndexes.append(it.key());
+    }
+    std::sort(pendingPairIndexes.begin(), pendingPairIndexes.end());
+
+    int startedPairCount = 0;
+    for (int pairIndex : pendingPairIndexes) {
+        if (startedPairCount >= availableSyncCount) {
+            break;
+        }
+
+        if (pairIndex < 0 || pairIndex >= _folderPairConfigs.size() || isPairSyncRunning(pairIndex)) {
+            continue;
+        }
+
+        const QString pendingReason = _pendingSyncReasons.take(pairIndex);
+        startPairSync(pairIndex, pendingReason);
+        ++startedPairCount;
+    }
+}
+
 void MainWindow::refreshStatusCell(int pairIndex)
 {
     if (pairIndex < 0 || pairIndex >= _folderPairConfigs.size()) {
@@ -853,13 +905,23 @@ void MainWindow::requestSyncByIndexes(const QVector<int> &pairIndexes, const QSt
     QVector<int> readyPairIndexes;
     pendingPairIndexes.reserve(normalizedIndexes.size());
     readyPairIndexes.reserve(normalizedIndexes.size());
+    int availableSyncCount = maxParallelSyncCount() - runningSyncCount();
 
     for (int pairIndex : normalizedIndexes) {
         if (isPairSyncRunning(pairIndex)) {
             _pendingSyncReasons.insert(pairIndex, reason);
             pendingPairIndexes.append(pairIndex);
-        } else {
+            continue;
+        }
+
+        if (availableSyncCount > 0) {
             readyPairIndexes.append(pairIndex);
+            --availableSyncCount;
+        } else {
+            _pendingSyncReasons.insert(pairIndex, reason);
+            updatePairProgress(pairIndex, 0, 0);
+            updatePairStatus(pairIndex, tr("等待执行（同步队列）"));
+            pendingPairIndexes.append(pairIndex);
         }
     }
 
@@ -883,6 +945,7 @@ void MainWindow::requestSyncByIndexes(const QVector<int> &pairIndexes, const QSt
         appendLog(tr("已加入待同步队列：%1").arg(buildPairListSummaryText(pendingPairIndexes)));
     }
 
+    startQueuedSyncs();
     refreshActionWidgets();
     updateControlState();
 }
@@ -958,7 +1021,8 @@ void MainWindow::startPairSync(int pairIndex, const QString &reason)
                               Qt::QueuedConnection,
                               Q_ARG(QString, pairConfig.sourcePath),
                               Q_ARG(QString, pairConfig.targetPath),
-                              Q_ARG(QString, reason));
+                              Q_ARG(QString, reason),
+                              Q_ARG(bool, _isFastCompareEnabled));
 }
 
 void MainWindow::handlePairSyncStarted(int pairIndex,
@@ -1029,9 +1093,13 @@ void MainWindow::handlePairSyncFinished(int pairIndex, bool success, const QStri
     if (_pendingSyncReasons.contains(pairIndex)) {
         const QString pendingReason = _pendingSyncReasons.take(pairIndex);
         QTimer::singleShot(0, this, [this, pairIndex, pendingReason]() {
-            startPairSync(pairIndex, pendingReason);
+            _pendingSyncReasons.insert(pairIndex, pendingReason);
+            startQueuedSyncs();
         });
+        return;
     }
+
+    startQueuedSyncs();
 }
 
 bool MainWindow::isPairSyncRunning(int pairIndex) const
@@ -1039,9 +1107,19 @@ bool MainWindow::isPairSyncRunning(int pairIndex) const
     return _runningSyncContexts.contains(pairIndex);
 }
 
+bool MainWindow::isPairSyncQueued(int pairIndex) const
+{
+    return _pendingSyncReasons.contains(pairIndex);
+}
+
 int MainWindow::runningSyncCount() const
 {
     return _runningSyncContexts.size();
+}
+
+int MainWindow::maxParallelSyncCount() const
+{
+    return kDefaultMaxParallelSyncCount;
 }
 
 QVector<int> MainWindow::buildEnabledPairIndexes() const
@@ -1137,7 +1215,7 @@ void MainWindow::editPair(int pairIndex)
         return;
     }
 
-    if (isPairSyncRunning(pairIndex)) {
+    if (isPairSyncRunning(pairIndex) || isPairSyncQueued(pairIndex)) {
         return;
     }
 
@@ -1178,7 +1256,7 @@ void MainWindow::syncPair(int pairIndex)
         return;
     }
 
-    if (isPairSyncRunning(pairIndex)) {
+    if (isPairSyncRunning(pairIndex) || isPairSyncQueued(pairIndex)) {
         return;
     }
 
@@ -1194,7 +1272,7 @@ void MainWindow::togglePairSync(int pairIndex)
         return;
     }
 
-    if (isPairSyncRunning(pairIndex)) {
+    if (isPairSyncRunning(pairIndex) || isPairSyncQueued(pairIndex)) {
         return;
     }
 
@@ -1237,6 +1315,8 @@ QWidget *MainWindow::createActionWidget(int pairIndex)
         new QPushButton(_folderPairConfigs.at(pairIndex).isSyncEnabled ? tr("取消同步") : tr("恢复同步"), container);
     const QPalette palette = container->palette();
     const bool isCurrentPairRunning = isPairSyncRunning(pairIndex);
+    const bool isCurrentPairQueued = isPairSyncQueued(pairIndex);
+    const bool isCurrentPairBusy = isCurrentPairRunning || isCurrentPairQueued;
 
     layout->setContentsMargins(4, 2, 4, 2);
     layout->setSpacing(6);
@@ -1261,11 +1341,14 @@ QWidget *MainWindow::createActionWidget(int pairIndex)
     if (isCurrentPairRunning) {
         syncButton->setText(tr("同步中"));
         syncButton->setToolTip(tr("当前这一组正在同步中"));
+    } else if (isCurrentPairQueued) {
+        syncButton->setText(tr("排队中"));
+        syncButton->setToolTip(tr("当前这一组已加入同步队列，等待空闲并发名额"));
     }
 
-    editButton->setEnabled(!isCurrentPairRunning);
-    syncButton->setEnabled(!isCurrentPairRunning);
-    toggleButton->setEnabled(!isCurrentPairRunning);
+    editButton->setEnabled(!isCurrentPairBusy);
+    syncButton->setEnabled(!isCurrentPairBusy);
+    toggleButton->setEnabled(!isCurrentPairBusy);
 
     connect(editButton, &QPushButton::clicked, container, [this, pairIndex]() {
         editPair(pairIndex);

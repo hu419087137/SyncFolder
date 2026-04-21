@@ -105,6 +105,16 @@
        </widget>
       </item>
       <item>
+       <widget class="QCheckBox" name="fastCompareCheckBox">
+        <property name="text">
+         <string>快速比对</string>
+        </property>
+        <property name="checked">
+         <bool>true</bool>
+        </property>
+       </widget>
+      </item>
+      <item>
        <spacer name="buttonSpacer">
         <property name="orientation">
          <enum>Qt::Horizontal</enum>

@@ -2,6 +2,7 @@
 
 #include <QDir>
 #include <QDirIterator>
+#include <QDateTime>
 #include <QFile>
 #include <QFileDevice>
 #include <QFileInfo>
@@ -187,6 +188,21 @@ bool shouldReportByteProgress(qint64 currentBytes, qint64 totalBytes)
 
     const qint64 reportInterval = qMax<qint64>(kFileCompareChunkSize, totalBytes / 100);
     return currentBytes % reportInterval < kFileCompareChunkSize;
+}
+
+bool isSameByFastMetadata(const QFileInfo &sourceInfo, const QFileInfo &targetInfo)
+{
+    if (!targetInfo.exists() || !targetInfo.isFile()) {
+        return false;
+    }
+
+    if (sourceInfo.size() != targetInfo.size()) {
+        return false;
+    }
+
+    constexpr qint64 kTimestampToleranceMs = 2000;
+    const qint64 timestampDiffMs = qAbs(sourceInfo.lastModified().msecsTo(targetInfo.lastModified()));
+    return timestampDiffMs <= kTimestampToleranceMs;
 }
 
 QString describeOperation(const SyncOperation &operation)
@@ -395,6 +411,7 @@ bool copyFileWithMetadata(const SyncOperation &operation,
                           const std::function<void(qint64, const QString &)> &progressCallback,
                           QString *errorMessage)
 {
+    const QFileInfo sourceInfo(operation.sourcePath);
     const QFileInfo targetInfo(operation.targetPath);
     if (!ensureDirectoryExists(targetInfo.dir().absolutePath(), errorMessage)) {
         return false;
@@ -457,6 +474,19 @@ bool copyFileWithMetadata(const SyncOperation &operation,
                                 .arg(operation.targetPath, targetFile.errorString());
         }
         return false;
+    }
+
+    QFile targetMetadataFile(operation.targetPath);
+    if (!targetMetadataFile.open(QIODevice::ReadWrite)) {
+        qWarning() << "Failed to open target file for timestamp update. target=" << operation.targetPath
+                   << "error=" << targetMetadataFile.errorString();
+        return true;
+    }
+
+    if (!targetMetadataFile.setFileTime(sourceInfo.lastModified(), QFileDevice::FileModificationTime)) {
+        qWarning() << "Failed to update target file timestamp. target=" << operation.targetPath
+                   << "source=" << operation.sourcePath
+                   << "error=" << targetMetadataFile.errorString();
     }
 
     return true;
@@ -532,6 +562,7 @@ bool buildSyncPlan(const QString &sourcePath,
                    const QString &targetPath,
                    QVector<SyncOperation> *operations,
                    SyncPlanStats *planStats,
+                   bool isFastCompareEnabled,
                    const std::function<void(const PlanStageProgress &)> &stageCallback,
                    QString *errorMessage)
 {
@@ -668,29 +699,32 @@ bool buildSyncPlan(const QString &sourcePath,
         if (sourceEntry.type == SyncEntryType::E_File) {
             QString compareErrorMessage;
             const QFileInfo sourceInfo(sourceEntry.absolutePath);
-            const FileCompareResult compareResult =
-                compareFileContent(sourceInfo,
-                                   targetInfo,
-                                   [stageCallback, comparedSourceEntryCount, sourceEntryCount](
-                                       qint64 comparedBytes,
-                                       qint64 totalBytes) {
-                                       if (stageCallback == nullptr || totalBytes <= 0) {
-                                           return;
-                                       }
+            FileCompareResult compareResult = FileCompareResult::E_Same;
+            if (!isFastCompareEnabled || !isSameByFastMetadata(sourceInfo, targetInfo)) {
+                compareResult =
+                    compareFileContent(sourceInfo,
+                                       targetInfo,
+                                       [stageCallback, comparedSourceEntryCount, sourceEntryCount](
+                                           qint64 comparedBytes,
+                                           qint64 totalBytes) {
+                                           if (stageCallback == nullptr || totalBytes <= 0) {
+                                               return;
+                                           }
 
-                                       stageCallback(
-                                           {comparedSourceEntryCount,
-                                            sourceEntryCount,
-                                            buildFileCompareProgressText(
-                                                comparedSourceEntryCount,
+                                           stageCallback(
+                                               {comparedSourceEntryCount,
                                                 sourceEntryCount,
-                                                qBound<int>(
-                                                    0,
-                                                    qRound(static_cast<double>(comparedBytes) * 100.0
-                                                           / static_cast<double>(totalBytes)),
-                                                    100))});
-                                   },
-                                   &compareErrorMessage);
+                                                buildFileCompareProgressText(
+                                                    comparedSourceEntryCount,
+                                                    sourceEntryCount,
+                                                    qBound<int>(
+                                                        0,
+                                                        qRound(static_cast<double>(comparedBytes) * 100.0
+                                                               / static_cast<double>(totalBytes)),
+                                                        100))});
+                                       },
+                                       &compareErrorMessage);
+            }
             if (compareResult == FileCompareResult::E_Error) {
                 if (errorMessage != nullptr) {
                     *errorMessage = compareErrorMessage;
@@ -819,13 +853,18 @@ FolderSyncWorker::FolderSyncWorker(QObject *parent)
 {
 }
 
-void FolderSyncWorker::slotStartSync(const QString &sourcePath, const QString &targetPath, const QString &reason)
+void FolderSyncWorker::slotStartSync(const QString &sourcePath,
+                                     const QString &targetPath,
+                                     const QString &reason,
+                                     bool isFastCompareEnabled)
 {
     const QString normalizedSourcePath = normalizePath(sourcePath);
     const QString normalizedTargetPath = normalizePath(targetPath);
 
     emit sigLogMessage(QObject::tr("收到同步请求，reason=%1，source=%2，target=%3")
                            .arg(reason, normalizedSourcePath, normalizedTargetPath));
+    emit sigLogMessage(isFastCompareEnabled ? QObject::tr("已启用快速比对：大小和修改时间一致时跳过全文比对")
+                                            : QObject::tr("已启用严格比对：大小一致时继续全文比对"));
 
     QString errorMessage;
     if (normalizedSourcePath.isEmpty() || normalizedTargetPath.isEmpty()) {
@@ -873,6 +912,7 @@ void FolderSyncWorker::slotStartSync(const QString &sourcePath, const QString &t
                        normalizedTargetPath,
                        &operations,
                        &planStats,
+                       isFastCompareEnabled,
                        [this](const PlanStageProgress &progress) {
                            emit sigSyncProgress(progress.current, progress.total, progress.text);
                        },
