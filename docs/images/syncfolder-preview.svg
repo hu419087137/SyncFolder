@@ -1,0 +1,124 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="760" viewBox="0 0 1200 760" role="img" aria-labelledby="title desc">
+  <title id="title">SyncFolder interface preview</title>
+  <desc id="desc">A preview of the SyncFolder Qt Widgets application showing multiple folder pairs, row progress, action buttons, and runtime logs.</desc>
+  <defs>
+    <linearGradient id="pageBg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#eef4ff"/>
+      <stop offset="0.52" stop-color="#f8fbff"/>
+      <stop offset="1" stop-color="#edf7f0"/>
+    </linearGradient>
+    <linearGradient id="windowBar" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#24324b"/>
+      <stop offset="1" stop-color="#365a66"/>
+    </linearGradient>
+    <filter id="shadow" x="-8%" y="-8%" width="116%" height="116%">
+      <feDropShadow dx="0" dy="18" stdDeviation="22" flood-color="#233248" flood-opacity="0.18"/>
+    </filter>
+    <style>
+      .ui-text { font-family: "Microsoft YaHei", "Noto Sans SC", sans-serif; fill: #273448; }
+      .muted { fill: #68768a; }
+      .small { font-size: 15px; }
+      .body { font-size: 17px; }
+      .title { font-size: 25px; font-weight: 700; fill: #ffffff; }
+      .section { font-size: 18px; font-weight: 700; }
+      .header { font-size: 15px; font-weight: 700; fill: #536273; }
+      .buttonText { font-size: 15px; font-weight: 700; fill: #ffffff; }
+      .mono { font-family: "Cascadia Mono", "Consolas", monospace; font-size: 14px; fill: #526171; }
+    </style>
+  </defs>
+
+  <rect width="1200" height="760" rx="34" fill="url(#pageBg)"/>
+  <g filter="url(#shadow)">
+    <rect x="54" y="52" width="1092" height="656" rx="24" fill="#ffffff"/>
+    <rect x="54" y="52" width="1092" height="72" rx="24" fill="url(#windowBar)"/>
+    <path d="M54 100h1092v24H54z" fill="url(#windowBar)"/>
+  </g>
+
+  <circle cx="90" cy="88" r="8" fill="#ff6b6b"/>
+  <circle cx="116" cy="88" r="8" fill="#ffc857"/>
+  <circle cx="142" cy="88" r="8" fill="#57d68d"/>
+  <text x="176" y="96" class="title">SyncFolder - 多组文件夹同步</text>
+
+  <g>
+    <rect x="82" y="146" width="1036" height="56" rx="14" fill="#f3f8ff" stroke="#dce8f6"/>
+    <text x="106" y="180" class="ui-text body">同步规则：每一组都以 A 主目录为准，把对应的 B 备份目录校正到与 A 一致。支持新增多组同步对，并自动记住上一次配置的路径。</text>
+  </g>
+
+  <g>
+    <rect x="82" y="226" width="1036" height="304" rx="18" fill="#ffffff" stroke="#d8e1ec"/>
+    <text x="108" y="260" class="ui-text section">同步对配置</text>
+
+    <rect x="108" y="282" width="112" height="36" rx="8" fill="#557cd6"/>
+    <text x="130" y="305" class="buttonText">新增同步对</text>
+    <rect x="232" y="282" width="112" height="36" rx="8" fill="#ca4d4d"/>
+    <text x="254" y="305" class="buttonText">删除选中项</text>
+
+    <rect x="108" y="338" width="984" height="168" rx="12" fill="#f8fbff" stroke="#d9e4ef"/>
+    <rect x="108" y="338" width="984" height="40" rx="12" fill="#eef5fc"/>
+    <text x="132" y="364" class="header">A 主目录</text>
+    <text x="410" y="364" class="header">B 备份目录</text>
+    <text x="688" y="364" class="header">状态 / 进度</text>
+    <text x="948" y="364" class="header">操作</text>
+
+    <g>
+      <rect x="108" y="378" width="984" height="42" fill="#ffffff"/>
+      <text x="132" y="404" class="mono">D:\Work\Design</text>
+      <text x="410" y="404" class="mono">E:\Backup\Design</text>
+      <rect x="688" y="395" width="104" height="10" rx="5" fill="#d7e1eb"/>
+      <rect x="688" y="395" width="75" height="10" rx="5" fill="#4b7fef"/>
+      <text x="804" y="406" class="ui-text small">72% 正在比对文件差异（362/501）</text>
+      <rect x="946" y="386" width="54" height="26" rx="7" fill="#557cd6"/>
+      <text x="961" y="404" class="buttonText small">编辑</text>
+      <rect x="1008" y="386" width="54" height="26" rx="7" fill="#309862"/>
+      <text x="1023" y="404" class="buttonText small">同步</text>
+      <rect x="1070" y="386" width="76" height="26" rx="7" fill="#dd6e36"/>
+      <text x="1083" y="404" class="buttonText small">取消同步</text>
+    </g>
+
+    <g>
+      <rect x="108" y="420" width="984" height="42" fill="#fdfefe"/>
+      <text x="132" y="446" class="mono">D:\Media\Raw</text>
+      <text x="410" y="446" class="mono">F:\Archive\Raw</text>
+      <rect x="688" y="437" width="104" height="10" rx="5" fill="#d7e1eb"/>
+      <rect x="688" y="437" width="42" height="10" rx="5" fill="#4b7fef"/>
+      <text x="804" y="448" class="ui-text small">41% 正在扫描主目录（804/1960）</text>
+      <rect x="946" y="428" width="54" height="26" rx="7" fill="#557cd6"/>
+      <text x="961" y="446" class="buttonText small">编辑</text>
+      <rect x="1008" y="428" width="54" height="26" rx="7" fill="#309862"/>
+      <text x="1023" y="446" class="buttonText small">同步</text>
+      <rect x="1070" y="428" width="76" height="26" rx="7" fill="#dd6e36"/>
+      <text x="1083" y="446" class="buttonText small">取消同步</text>
+    </g>
+
+    <g>
+      <rect x="108" y="462" width="984" height="44" fill="#ffffff"/>
+      <text x="132" y="489" class="mono">D:\QtDemo\Docs</text>
+      <text x="410" y="489" class="mono">E:\Backup\Docs</text>
+      <rect x="688" y="479" width="104" height="10" rx="5" fill="#d7e1eb"/>
+      <rect x="688" y="479" width="104" height="10" rx="5" fill="#46a368"/>
+      <text x="804" y="490" class="ui-text small">100% 最近一次：成功</text>
+      <rect x="946" y="470" width="54" height="26" rx="7" fill="#557cd6"/>
+      <text x="961" y="488" class="buttonText small">编辑</text>
+      <rect x="1008" y="470" width="54" height="26" rx="7" fill="#309862"/>
+      <text x="1023" y="488" class="buttonText small">同步</text>
+      <rect x="1070" y="470" width="76" height="26" rx="7" fill="#dd6e36"/>
+      <text x="1083" y="488" class="buttonText small">取消同步</text>
+    </g>
+  </g>
+
+  <g>
+    <rect x="82" y="550" width="142" height="38" rx="9" fill="#557cd6"/>
+    <text x="107" y="574" class="buttonText">启动全部监控</text>
+    <rect x="238" y="550" width="112" height="38" rx="9" fill="#dd6e36"/>
+    <text x="262" y="574" class="buttonText">停止监控</text>
+    <rect x="364" y="550" width="96" height="38" rx="9" fill="#309862"/>
+    <text x="386" y="574" class="buttonText">同步全部</text>
+  </g>
+
+  <g>
+    <rect x="82" y="610" width="1036" height="70" rx="16" fill="#ffffff" stroke="#d8e1ec"/>
+    <text x="108" y="637" class="ui-text section">运行日志</text>
+    <text x="108" y="663" class="mono">[2026-04-21 10:12:36] 手动同步全部：本次纳入 3 组已启用同步对，跳过 0 组已暂停同步对。</text>
+    <text x="108" y="684" class="mono">[2026-04-21 10:12:37] 第 1 组：正在比对文件差异，实时刷新行内进度。</text>
+  </g>
+</svg>

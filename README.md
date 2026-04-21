@@ -2,6 +2,10 @@
 
 一个基于 `Qt Widgets + CMake` 的文件夹同步示例项目。
 
+## 界面预览
+
+![SyncFolder 界面预览](docs/images/syncfolder-preview.svg)
+
 - 支持动态维护多组 `A -> B` 同步对
 - 每一组中 `A` 为主目录，`B` 为备份目录
 - 启动监控后，程序会在后台线程中持续把每个 `B` 修正为与对应的 `A` 一致
