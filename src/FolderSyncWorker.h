@@ -14,6 +14,14 @@ class FolderSyncWorker : public QObject
     Q_OBJECT
 
 public:
+    enum CompareMode
+    {
+        E_StrictCompare = 0,
+        E_FastCompare = 1,
+        E_TurboCompare = 2
+    };
+    Q_ENUM(CompareMode)
+
     /**
      * @brief 构造同步工作对象。
      * @param parent QObject 父对象。
@@ -26,12 +34,12 @@ public slots:
      * @param sourcePath A 主目录绝对路径。
      * @param targetPath B 备份目录绝对路径。
      * @param reason 触发本次同步的原因，便于日志定位。
-     * @param isFastCompareEnabled 是否使用“大小 + 修改时间”的快速差异判断。
+     * @param compareMode 文件差异判断模式。
      */
     void slotStartSync(const QString &sourcePath,
                        const QString &targetPath,
                        const QString &reason,
-                       bool isFastCompareEnabled);
+                       CompareMode compareMode);
 
     /**
      * @brief 请求取消当前同步任务。

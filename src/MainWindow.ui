@@ -108,14 +108,7 @@
        <widget class="QComboBox" name="maxParallelSyncComboBox"/>
       </item>
       <item>
-       <widget class="QCheckBox" name="fastCompareCheckBox">
-        <property name="text">
-         <string>快速比对</string>
-        </property>
-        <property name="checked">
-         <bool>true</bool>
-        </property>
-       </widget>
+       <widget class="QComboBox" name="compareModeComboBox"/>
       </item>
       <item>
        <spacer name="buttonSpacer">

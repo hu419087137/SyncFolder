@@ -208,6 +208,20 @@ bool isSameByFastMetadata(const QFileInfo &sourceInfo, const QFileInfo &targetIn
     return timestampDiffMs <= kTimestampToleranceMs;
 }
 
+QString describeCompareMode(FolderSyncWorker::CompareMode compareMode)
+{
+    switch (compareMode) {
+    case FolderSyncWorker::E_StrictCompare:
+        return QObject::tr("已启用严格比对：大小一致时继续全文比对");
+    case FolderSyncWorker::E_FastCompare:
+        return QObject::tr("已启用快速比对：大小和修改时间一致时跳过全文比对");
+    case FolderSyncWorker::E_TurboCompare:
+        return QObject::tr("已启用极速比对：只按大小和修改时间判断，不读取全文");
+    }
+
+    return QObject::tr("已启用快速比对：大小和修改时间一致时跳过全文比对");
+}
+
 QString describeOperation(const SyncOperation &operation)
 {
     switch (operation.type) {
@@ -589,7 +603,7 @@ bool buildSyncPlan(const QString &sourcePath,
                    const QString &targetPath,
                    QVector<SyncOperation> *operations,
                    SyncPlanStats *planStats,
-                   bool isFastCompareEnabled,
+                   FolderSyncWorker::CompareMode compareMode,
                    const std::function<void(const PlanStageProgress &)> &stageCallback,
                    const CancelCallback &cancelCallback,
                    QString *errorMessage)
@@ -742,8 +756,15 @@ bool buildSyncPlan(const QString &sourcePath,
         if (sourceEntry.type == SyncEntryType::E_File) {
             QString compareErrorMessage;
             const QFileInfo sourceInfo(sourceEntry.absolutePath);
-            FileCompareResult compareResult = FileCompareResult::E_Same;
-            if (!isFastCompareEnabled || !isSameByFastMetadata(sourceInfo, targetInfo)) {
+            FileCompareResult compareResult = FileCompareResult::E_Different;
+            if (compareMode == FolderSyncWorker::E_TurboCompare) {
+                compareResult =
+                    isSameByFastMetadata(sourceInfo, targetInfo) ? FileCompareResult::E_Same
+                                                                 : FileCompareResult::E_Different;
+            } else if (compareMode == FolderSyncWorker::E_FastCompare
+                       && isSameByFastMetadata(sourceInfo, targetInfo)) {
+                compareResult = FileCompareResult::E_Same;
+            } else {
                 compareResult =
                     compareFileContent(sourceInfo,
                                        targetInfo,
@@ -913,7 +934,7 @@ void FolderSyncWorker::slotCancelSync()
 void FolderSyncWorker::slotStartSync(const QString &sourcePath,
                                      const QString &targetPath,
                                      const QString &reason,
-                                     bool isFastCompareEnabled)
+                                     CompareMode compareMode)
 {
     _isCancelRequested.storeRelease(0);
     auto isCancelRequested = [this]() {
@@ -925,8 +946,7 @@ void FolderSyncWorker::slotStartSync(const QString &sourcePath,
 
     emit sigLogMessage(QObject::tr("收到同步请求，reason=%1，source=%2，target=%3")
                            .arg(reason, normalizedSourcePath, normalizedTargetPath));
-    emit sigLogMessage(isFastCompareEnabled ? QObject::tr("已启用快速比对：大小和修改时间一致时跳过全文比对")
-                                            : QObject::tr("已启用严格比对：大小一致时继续全文比对"));
+    emit sigLogMessage(describeCompareMode(compareMode));
 
     QString errorMessage;
     if (normalizedSourcePath.isEmpty() || normalizedTargetPath.isEmpty()) {
@@ -974,7 +994,7 @@ void FolderSyncWorker::slotStartSync(const QString &sourcePath,
                        normalizedTargetPath,
                        &operations,
                        &planStats,
-                       isFastCompareEnabled,
+                       compareMode,
                        [this](const PlanStageProgress &progress) {
                            emit sigSyncProgress(progress.current, progress.total, progress.text);
                        },

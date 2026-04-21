@@ -2,7 +2,6 @@
 
 #include <QApplication>
 #include <QAbstractItemView>
-#include <QCheckBox>
 #include <QColor>
 #include <QComboBox>
 #include <QDateTime>
@@ -49,6 +48,8 @@ constexpr int kStatusColumnWidth = 360;
 constexpr int kActionColumnWidth = 270;
 constexpr int kTableRowHeight = 48;
 constexpr int kDefaultMaxParallelSyncCount = 2;
+constexpr int kDefaultCompareMode = 1;
+constexpr qint64 kProgressUiUpdateIntervalMs = 300;
 
 enum class ButtonStyleKind
 {
@@ -352,7 +353,7 @@ MainWindow::MainWindow(QWidget *parent)
       _periodicCheckTimer(nullptr),
       _folderWatcher(nullptr),
       _isMonitoring(false),
-      _isFastCompareEnabled(true),
+      _compareMode(kDefaultCompareMode),
       _maxParallelSyncCount(kDefaultMaxParallelSyncCount)
 {
     buildUi();
@@ -551,8 +552,11 @@ void MainWindow::buildUi()
     _ui->maxParallelSyncComboBox->addItem(tr("并发 3 组"), 3);
     _ui->maxParallelSyncComboBox->addItem(tr("并发 4 组"), 4);
     _ui->maxParallelSyncComboBox->setToolTip(tr("限制同步全部时同时运行的任务数，机械硬盘或移动盘建议 1-2。"));
-    _ui->fastCompareCheckBox->setToolTip(
-        tr("启用后，文件大小和修改时间一致时跳过全文读取；适合大文件多的目录。"));
+    _ui->compareModeComboBox->addItem(tr("严格比对"), FolderSyncWorker::E_StrictCompare);
+    _ui->compareModeComboBox->addItem(tr("快速比对"), FolderSyncWorker::E_FastCompare);
+    _ui->compareModeComboBox->addItem(tr("极速比对"), FolderSyncWorker::E_TurboCompare);
+    _ui->compareModeComboBox->setToolTip(
+        tr("严格比对最准确；快速比对在大小和修改时间一致时跳过全文；极速比对只按大小和时间判断。"));
 
     _pairTableModel = new QStandardItemModel(this);
     _pairTableModel->setColumnCount(4);
@@ -604,10 +608,10 @@ void MainWindow::buildUi()
                 refreshActionWidgets();
                 updateControlState();
             });
-    connect(_ui->fastCompareCheckBox, &QCheckBox::toggled, this, [this](bool checked) {
-        _isFastCompareEnabled = checked;
+    connect(_ui->compareModeComboBox, &QComboBox::currentIndexChanged, this, [this](int index) {
+        _compareMode = _ui->compareModeComboBox->itemData(index).toInt();
         saveSettings();
-        appendLog(checked ? tr("已启用快速比对模式。") : tr("已关闭快速比对模式。"));
+        appendLog(tr("已切换比对模式：%1。").arg(_ui->compareModeComboBox->itemText(index)));
     });
 }
 
@@ -630,13 +634,22 @@ void MainWindow::applyButtonStyles()
     _ui->stopMonitorButton->setCursor(Qt::PointingHandCursor);
     _ui->syncAllPairsButton->setCursor(Qt::PointingHandCursor);
     _ui->maxParallelSyncComboBox->setCursor(Qt::PointingHandCursor);
-    _ui->fastCompareCheckBox->setCursor(Qt::PointingHandCursor);
+    _ui->compareModeComboBox->setCursor(Qt::PointingHandCursor);
 }
 
 void MainWindow::loadSettings()
 {
     QSettings settings(settingsFilePath(), QSettings::IniFormat);
-    _isFastCompareEnabled = settings.value(QStringLiteral("syncOptions/fastCompareEnabled"), true).toBool();
+    const bool isLegacyFastCompareEnabled =
+        settings.value(QStringLiteral("syncOptions/fastCompareEnabled"), true).toBool();
+    _compareMode =
+        settings.value(QStringLiteral("syncOptions/compareMode"),
+                       isLegacyFastCompareEnabled ? FolderSyncWorker::E_FastCompare
+                                                  : FolderSyncWorker::E_StrictCompare)
+            .toInt();
+    _compareMode = qBound(static_cast<int>(FolderSyncWorker::E_StrictCompare),
+                          _compareMode,
+                          static_cast<int>(FolderSyncWorker::E_TurboCompare));
     _maxParallelSyncCount =
         qBound(1, settings.value(QStringLiteral("syncOptions/maxParallelSyncCount"),
                                  kDefaultMaxParallelSyncCount)
@@ -648,8 +661,9 @@ void MainWindow::loadSettings()
         _ui->maxParallelSyncComboBox->setCurrentIndex(maxParallelIndex >= 0 ? maxParallelIndex : 1);
     }
     {
-        const QSignalBlocker blocker(_ui->fastCompareCheckBox);
-        _ui->fastCompareCheckBox->setChecked(_isFastCompareEnabled);
+        const QSignalBlocker blocker(_ui->compareModeComboBox);
+        const int compareModeIndex = _ui->compareModeComboBox->findData(_compareMode);
+        _ui->compareModeComboBox->setCurrentIndex(compareModeIndex >= 0 ? compareModeIndex : 1);
     }
 
     const int pairCount = settings.beginReadArray(QStringLiteral("folderPairs"));
@@ -684,7 +698,9 @@ void MainWindow::loadSettings()
 void MainWindow::saveSettings() const
 {
     QSettings settings(settingsFilePath(), QSettings::IniFormat);
-    settings.setValue(QStringLiteral("syncOptions/fastCompareEnabled"), _isFastCompareEnabled);
+    settings.setValue(QStringLiteral("syncOptions/compareMode"), _compareMode);
+    settings.setValue(QStringLiteral("syncOptions/fastCompareEnabled"),
+                      _compareMode != FolderSyncWorker::E_StrictCompare);
     settings.setValue(QStringLiteral("syncOptions/maxParallelSyncCount"), _maxParallelSyncCount);
     settings.remove(QStringLiteral("folderPairs"));
     settings.beginWriteArray(QStringLiteral("folderPairs"));
@@ -995,6 +1011,7 @@ void MainWindow::startPairSync(int pairIndex, const QString &reason)
     syncContext.worker = worker;
     syncContext.currentStep = 0;
     syncContext.totalSteps = 0;
+    syncContext.uiProgressTimer.start();
     syncContext.reason = reason;
     _runningSyncContexts.insert(pairIndex, syncContext);
 
@@ -1054,7 +1071,8 @@ void MainWindow::startPairSync(int pairIndex, const QString &reason)
                               Q_ARG(QString, pairConfig.sourcePath),
                               Q_ARG(QString, pairConfig.targetPath),
                               Q_ARG(QString, reason),
-                              Q_ARG(bool, _isFastCompareEnabled));
+                              Q_ARG(FolderSyncWorker::CompareMode,
+                                    static_cast<FolderSyncWorker::CompareMode>(_compareMode)));
 }
 
 void MainWindow::handlePairSyncStarted(int pairIndex,
@@ -1098,8 +1116,25 @@ void MainWindow::handlePairSyncProgress(int pairIndex,
     RunningSyncContext &syncContext = _runningSyncContexts[pairIndex];
     syncContext.currentStep = currentStep;
     syncContext.totalSteps = totalSteps <= 0 ? 0 : qMax<qint64>(1, totalSteps);
+    const bool isPhaseChanged = stripProgressSuffix(syncContext.lastUiStatusText)
+        != stripProgressSuffix(currentItem);
+    const bool isFinished = totalSteps > 0 && currentStep >= totalSteps;
+    const bool shouldUpdateUi = isPhaseChanged
+        || isFinished
+        || syncContext.lastUiProgressValue < 0
+        || syncContext.lastUiProgressMaximum != syncContext.totalSteps
+        || !syncContext.uiProgressTimer.isValid()
+        || syncContext.uiProgressTimer.elapsed() >= kProgressUiUpdateIntervalMs;
+    if (!shouldUpdateUi) {
+        return;
+    }
+
     updatePairProgress(pairIndex, currentStep, totalSteps);
     updatePairStatus(pairIndex, currentItem);
+    syncContext.lastUiProgressValue = currentStep;
+    syncContext.lastUiProgressMaximum = syncContext.totalSteps;
+    syncContext.lastUiStatusText = currentItem;
+    syncContext.uiProgressTimer.restart();
 }
 
 void MainWindow::handlePairSyncFinished(int pairIndex, bool success, const QString &summary)

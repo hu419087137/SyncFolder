@@ -2,6 +2,7 @@
 
 #include <QHash>
 #include <QMainWindow>
+#include <QElapsedTimer>
 #include <QVector>
 
 class FolderSyncWorker;
@@ -70,6 +71,10 @@ private:
         FolderSyncWorker *worker = nullptr;
         qint64 currentStep = 0;
         qint64 totalSteps = 1;
+        qint64 lastUiProgressValue = -1;
+        qint64 lastUiProgressMaximum = -1;
+        QString lastUiStatusText;
+        QElapsedTimer uiProgressTimer;
         QString reason;
     };
 
@@ -134,7 +139,7 @@ private:
     QHash<int, RunningSyncContext> _runningSyncContexts;
     QHash<int, QString> _pendingSyncReasons;
     bool _isMonitoring;
-    bool _isFastCompareEnabled;
+    int _compareMode;
     int _maxParallelSyncCount;
     QString _scheduledReason;
 };
