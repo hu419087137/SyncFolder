@@ -8,13 +8,18 @@
 #include <QDir>
 #include <QEvent>
 #include <QFileInfo>
+#include <QFileDialog>
 #include <QHeaderView>
 #include <QHBoxLayout>
 #include <QItemSelectionModel>
+#include <QLineEdit>
 #include <QMessageBox>
+#include <QMetaObject>
+#include <QMetaType>
 #include <QPainter>
 #include <QPushButton>
 #include <QRectF>
+#include <QSpinBox>
 #include <QSet>
 #include <QSettings>
 #include <QSignalBlocker>
@@ -25,6 +30,7 @@
 #include <QStyle>
 #include <QThread>
 #include <QTimer>
+#include <QUrl>
 #include <QWidget>
 #include <QtGlobal>
 
@@ -32,7 +38,10 @@
 
 #include "FolderSyncWorker.h"
 #include "FolderWatcher.h"
+#include "HttpFolderSyncWorker.h"
+#include "HttpSyncServer.h"
 #include "PairEditDialog.h"
+#include "SyncTypes.h"
 #include "ui_MainWindow.h"
 
 namespace
@@ -344,6 +353,46 @@ bool isSameOrNestedPath(const QString &sourcePath, const QString &targetPath)
     return normalizedSourcePath.startsWith(targetPrefix, caseSensitivity)
         || normalizedTargetPath.startsWith(sourcePrefix, caseSensitivity);
 }
+
+QString normalizeHttpSourceUrlInternal(const QString &sourceUrl)
+{
+    const QString trimmedUrl = sourceUrl.trimmed();
+    if (trimmedUrl.isEmpty()) {
+        return QString();
+    }
+
+    QUrl url = QUrl::fromUserInput(trimmedUrl);
+    if (!url.isValid() || url.scheme().isEmpty() || url.host().isEmpty()) {
+        return QString();
+    }
+
+    const QString scheme = url.scheme().toLower();
+    if (scheme != QStringLiteral("http") && scheme != QStringLiteral("https")) {
+        return QString();
+    }
+
+    url.setFragment(QString());
+    url.setQuery(QString());
+
+    QString path = url.path();
+    while (path.endsWith(QLatin1Char('/')) && path.size() > 1) {
+        path.chop(1);
+    }
+    if (path.endsWith(QStringLiteral("/api/v1/manifest"))) {
+        path.chop(QStringLiteral("/manifest").size());
+    } else if (path.endsWith(QStringLiteral("/api/v1/file"))) {
+        path.chop(QStringLiteral("/file").size());
+    }
+    if (!path.endsWith(QStringLiteral("/api/v1"))) {
+        if (path.isEmpty() || path == QStringLiteral("/")) {
+            path = QStringLiteral("/api/v1");
+        } else {
+            path += QStringLiteral("/api/v1");
+        }
+    }
+    url.setPath(path);
+    return url.toString(QUrl::RemoveQuery | QUrl::RemoveFragment);
+}
 } // namespace
 
 MainWindow::MainWindow(QWidget *parent)
@@ -353,10 +402,14 @@ MainWindow::MainWindow(QWidget *parent)
       _debounceTimer(nullptr),
       _periodicCheckTimer(nullptr),
       _folderWatcher(nullptr),
+      _httpSyncServer(nullptr),
       _isMonitoring(false),
       _compareMode(kDefaultCompareMode),
-      _maxParallelSyncCount(kDefaultMaxParallelSyncCount)
+      _maxParallelSyncCount(kDefaultMaxParallelSyncCount),
+      _httpServerPort(8086)
 {
+    qRegisterMetaType<FolderSyncWorker::CompareMode>("FolderSyncWorker::CompareMode");
+
     buildUi();
 
     _debounceTimer = new QTimer(this);
@@ -371,7 +424,15 @@ MainWindow::MainWindow(QWidget *parent)
     _folderWatcher = new FolderWatcher(this);
     connect(_folderWatcher, &FolderWatcher::sigFolderChanged, this, &MainWindow::slotWatcherChanged);
 
+    _httpSyncServer = new HttpSyncServer(this);
+    connect(_httpSyncServer, &HttpSyncServer::sigLogMessage, this, &MainWindow::appendLog);
+    connect(_httpSyncServer,
+            &HttpSyncServer::sigServerStateChanged,
+            this,
+            &MainWindow::slotHttpServerStateChanged);
+
     loadSettings();
+    refreshHttpServerUi();
     updateControlState();
 
     if (_folderPairConfigs.isEmpty()) {
@@ -463,6 +524,31 @@ void MainWindow::slotPairSelectionChanged()
     updateControlState();
 }
 
+void MainWindow::slotStartHttpServer()
+{
+    _httpServerRootPath = normalizeLocalPath(_ui->httpServerRootPathEdit->text());
+    _httpServerAccessToken = _ui->httpServerTokenEdit->text().trimmed();
+    _httpServerPort = static_cast<quint16>(_ui->httpServerPortSpinBox->value());
+    _ui->httpServerRootPathEdit->setText(QDir::toNativeSeparators(_httpServerRootPath));
+
+    QString errorMessage;
+    if (!_httpSyncServer->startServer(_httpServerRootPath, _httpServerPort, _httpServerAccessToken, &errorMessage)) {
+        QMessageBox::warning(this, tr("无法启动 HTTP 服务"), errorMessage);
+        appendLog(errorMessage);
+        refreshHttpServerUi();
+        return;
+    }
+
+    saveSettings();
+    refreshHttpServerUi();
+}
+
+void MainWindow::slotStopHttpServer()
+{
+    _httpSyncServer->stopServer();
+    refreshHttpServerUi();
+}
+
 void MainWindow::slotStartMonitoring()
 {
     QString errorMessage;
@@ -545,6 +631,15 @@ void MainWindow::slotPeriodicCheck()
     }
 }
 
+void MainWindow::slotHttpServerStateChanged(bool isRunning, quint16 listenPort)
+{
+    Q_UNUSED(listenPort)
+    if (isRunning) {
+        _httpServerPort = _httpSyncServer->listenPort();
+    }
+    refreshHttpServerUi();
+}
+
 void MainWindow::buildUi()
 {
     _ui->setupUi(this);
@@ -560,11 +655,15 @@ void MainWindow::buildUi()
     _ui->compareModeComboBox->addItem(tr("极速比对"), FolderSyncWorker::E_TurboCompare);
     _ui->compareModeComboBox->setToolTip(
         tr("严格比对最准确；快速比对在大小和修改时间一致时跳过全文；极速比对只按大小和时间判断。"));
+    _ui->httpServerPortSpinBox->setRange(1, 65535);
+    _ui->httpServerPortSpinBox->setValue(_httpServerPort);
+    _ui->httpServerRootPathEdit->setPlaceholderText(tr("选择当前电脑上要共享给其他设备同步的目录"));
+    _ui->httpServerTokenEdit->setPlaceholderText(tr("可选：访问令牌，留空则不鉴权"));
 
     _pairTableModel = new QStandardItemModel(this);
     _pairTableModel->setColumnCount(4);
     _pairTableModel->setHorizontalHeaderLabels(
-        QStringList{tr("A 主目录"), tr("B 备份目录"), tr("状态 / 进度"), tr("操作")});
+        QStringList{tr("同步源"), tr("B 备份目录"), tr("状态 / 进度"), tr("操作")});
 
     _ui->pairTableView->setModel(_pairTableModel);
     _ui->pairTableView->setWordWrap(false);
@@ -592,6 +691,20 @@ void MainWindow::buildUi()
 
     connect(_ui->addPairButton, &QPushButton::clicked, this, &MainWindow::slotAddPair);
     connect(_ui->removePairButton, &QPushButton::clicked, this, &MainWindow::slotRemoveSelectedPair);
+    connect(_ui->startHttpServerButton, &QPushButton::clicked, this, &MainWindow::slotStartHttpServer);
+    connect(_ui->stopHttpServerButton, &QPushButton::clicked, this, &MainWindow::slotStopHttpServer);
+    connect(_ui->browseHttpServerRootButton, &QPushButton::clicked, this, [this]() {
+        const QString selectedPath = QFileDialog::getExistingDirectory(
+            this,
+            tr("选择 HTTP 服务根目录"),
+            _httpServerRootPath.isEmpty() ? QDir::homePath() : _httpServerRootPath);
+        if (selectedPath.isEmpty()) {
+            return;
+        }
+
+        _httpServerRootPath = normalizeLocalPath(selectedPath);
+        _ui->httpServerRootPathEdit->setText(QDir::toNativeSeparators(_httpServerRootPath));
+    });
     connect(_ui->pairTableView->selectionModel(),
             &QItemSelectionModel::selectionChanged,
             this,
@@ -633,12 +746,18 @@ void MainWindow::applyButtonStyles()
     _ui->startMonitorButton->setStyleSheet(buildActionButtonStyle(ButtonStyleKind::E_Primary, palette));
     _ui->stopMonitorButton->setStyleSheet(buildActionButtonStyle(ButtonStyleKind::E_Warning, palette));
     _ui->syncAllPairsButton->setStyleSheet(buildActionButtonStyle(ButtonStyleKind::E_Success, palette));
+    _ui->startHttpServerButton->setStyleSheet(buildActionButtonStyle(ButtonStyleKind::E_Primary, palette));
+    _ui->stopHttpServerButton->setStyleSheet(buildActionButtonStyle(ButtonStyleKind::E_Danger, palette));
+    _ui->browseHttpServerRootButton->setStyleSheet(buildActionButtonStyle(ButtonStyleKind::E_Neutral, palette));
 
     _ui->addPairButton->setCursor(Qt::PointingHandCursor);
     _ui->removePairButton->setCursor(Qt::PointingHandCursor);
     _ui->startMonitorButton->setCursor(Qt::PointingHandCursor);
     _ui->stopMonitorButton->setCursor(Qt::PointingHandCursor);
     _ui->syncAllPairsButton->setCursor(Qt::PointingHandCursor);
+    _ui->startHttpServerButton->setCursor(Qt::PointingHandCursor);
+    _ui->stopHttpServerButton->setCursor(Qt::PointingHandCursor);
+    _ui->browseHttpServerRootButton->setCursor(Qt::PointingHandCursor);
     _ui->maxParallelSyncComboBox->setCursor(Qt::PointingHandCursor);
     _ui->compareModeComboBox->setCursor(Qt::PointingHandCursor);
 }
@@ -671,14 +790,29 @@ void MainWindow::loadSettings()
         const int compareModeIndex = _ui->compareModeComboBox->findData(_compareMode);
         _ui->compareModeComboBox->setCurrentIndex(compareModeIndex >= 0 ? compareModeIndex : 1);
     }
+    _httpServerRootPath = normalizeLocalPath(settings.value(QStringLiteral("httpServer/rootPath")).toString());
+    _httpServerAccessToken = settings.value(QStringLiteral("httpServer/accessToken")).toString().trimmed();
+    _httpServerPort = static_cast<quint16>(settings.value(QStringLiteral("httpServer/port"), 8086).toUInt());
+    if (_httpServerPort == 0) {
+        _httpServerPort = 8086;
+    }
+    _ui->httpServerRootPathEdit->setText(QDir::toNativeSeparators(_httpServerRootPath));
+    _ui->httpServerTokenEdit->setText(_httpServerAccessToken);
+    _ui->httpServerPortSpinBox->setValue(_httpServerPort);
 
     const int pairCount = settings.beginReadArray(QStringLiteral("folderPairs"));
     for (int index = 0; index < pairCount; ++index) {
         settings.setArrayIndex(index);
 
         FolderPairConfig pairConfig;
-        pairConfig.sourcePath = normalizePath(settings.value(QStringLiteral("sourcePath")).toString());
-        pairConfig.targetPath = normalizePath(settings.value(QStringLiteral("targetPath")).toString());
+        pairConfig.sourceType =
+            settings.value(QStringLiteral("sourceType"), E_LocalDirectorySource).toInt();
+        pairConfig.sourcePath = pairConfig.sourceType == E_HttpDirectorySource
+            ? normalizeHttpSourceUrl(settings.value(QStringLiteral("sourcePath")).toString())
+            : normalizeLocalPath(settings.value(QStringLiteral("sourcePath")).toString());
+        pairConfig.sourceAccessToken =
+            settings.value(QStringLiteral("sourceAccessToken")).toString().trimmed();
+        pairConfig.targetPath = normalizeLocalPath(settings.value(QStringLiteral("targetPath")).toString());
         pairConfig.statusText = tr("待同步");
         pairConfig.isSyncEnabled = settings.value(QStringLiteral("isSyncEnabled"), true).toBool();
 
@@ -708,15 +842,47 @@ void MainWindow::saveSettings() const
     settings.setValue(QStringLiteral("syncOptions/fastCompareEnabled"),
                       _compareMode != FolderSyncWorker::E_StrictCompare);
     settings.setValue(QStringLiteral("syncOptions/maxParallelSyncCount"), _maxParallelSyncCount);
+    const QString httpServerRootPath = _ui != nullptr && _ui->httpServerRootPathEdit != nullptr
+        ? normalizeLocalPath(_ui->httpServerRootPathEdit->text())
+        : _httpServerRootPath;
+    const QString httpServerAccessToken = _ui != nullptr && _ui->httpServerTokenEdit != nullptr
+        ? _ui->httpServerTokenEdit->text().trimmed()
+        : _httpServerAccessToken;
+    const quint16 httpServerPort = _ui != nullptr && _ui->httpServerPortSpinBox != nullptr
+        ? static_cast<quint16>(_ui->httpServerPortSpinBox->value())
+        : _httpServerPort;
+    settings.setValue(QStringLiteral("httpServer/rootPath"), httpServerRootPath);
+    settings.setValue(QStringLiteral("httpServer/accessToken"), httpServerAccessToken);
+    settings.setValue(QStringLiteral("httpServer/port"), httpServerPort);
     settings.remove(QStringLiteral("folderPairs"));
     settings.beginWriteArray(QStringLiteral("folderPairs"));
     for (int index = 0; index < _folderPairConfigs.size(); ++index) {
         settings.setArrayIndex(index);
+        settings.setValue(QStringLiteral("sourceType"), _folderPairConfigs.at(index).sourceType);
         settings.setValue(QStringLiteral("sourcePath"), _folderPairConfigs.at(index).sourcePath);
+        settings.setValue(QStringLiteral("sourceAccessToken"), _folderPairConfigs.at(index).sourceAccessToken);
         settings.setValue(QStringLiteral("targetPath"), _folderPairConfigs.at(index).targetPath);
         settings.setValue(QStringLiteral("isSyncEnabled"), _folderPairConfigs.at(index).isSyncEnabled);
     }
     settings.endArray();
+}
+
+void MainWindow::refreshHttpServerUi()
+{
+    const bool isRunning = _httpSyncServer != nullptr && _httpSyncServer->isRunning();
+    if (isRunning) {
+        _ui->httpServerEndpointLabel->setText(
+            tr("已启动：%1").arg(_httpSyncServer->endpointUrls().join(tr("； "))));
+    } else {
+        _ui->httpServerEndpointLabel->setText(tr("未启动。建议其他电脑填写本机显示的 `http://IP:端口/api/v1` 地址。"));
+    }
+
+    _ui->startHttpServerButton->setEnabled(!isRunning);
+    _ui->stopHttpServerButton->setEnabled(isRunning);
+    _ui->httpServerRootPathEdit->setEnabled(!isRunning);
+    _ui->browseHttpServerRootButton->setEnabled(!isRunning);
+    _ui->httpServerPortSpinBox->setEnabled(!isRunning);
+    _ui->httpServerTokenEdit->setEnabled(!isRunning);
 }
 
 void MainWindow::refreshPairTable()
@@ -730,8 +896,8 @@ void MainWindow::refreshPairTable()
 
         for (int row = 0; row < _folderPairConfigs.size(); ++row) {
             const FolderPairConfig &pairConfig = _folderPairConfigs.at(row);
-            const QString sourcePathText = QDir::toNativeSeparators(pairConfig.sourcePath);
-            const QString targetPathText = QDir::toNativeSeparators(pairConfig.targetPath);
+            const QString sourcePathText = buildSourceDisplayText(pairConfig);
+            const QString targetPathText = buildTargetDisplayText(pairConfig);
 
             auto *sourceItem = new QStandardItem(sourcePathText);
             auto *targetItem = new QStandardItem(targetPathText);
@@ -810,6 +976,9 @@ void MainWindow::refreshWatcher()
     watchedFolders.reserve(enabledPairIndexes.size());
     for (int pairIndex : enabledPairIndexes) {
         const FolderPairConfig &pairConfig = _folderPairConfigs.at(pairIndex);
+        if (isHttpSourcePair(pairConfig)) {
+            continue;
+        }
         // 只监听 A 主目录，避免程序同步 B 时反复触发自身监控。
         watchedFolders.append(pairConfig.sourcePath);
     }
@@ -1026,10 +1195,19 @@ bool MainWindow::startPairSync(int pairIndex, const QString &reason, bool should
 
     const FolderPairConfig &pairConfig = _folderPairConfigs.at(pairIndex);
     auto *thread = new QThread(this);
-    auto *worker = new FolderSyncWorker();
+    QObject *worker = nullptr;
+    int workerKind = E_LocalFolderSyncWorker;
+    if (isHttpSourcePair(pairConfig)) {
+        worker = new HttpFolderSyncWorker();
+        workerKind = E_HttpFolderSyncWorker;
+    } else {
+        worker = new FolderSyncWorker();
+        workerKind = E_LocalFolderSyncWorker;
+    }
     RunningSyncContext syncContext;
     syncContext.thread = thread;
     syncContext.worker = worker;
+    syncContext.workerKind = workerKind;
     syncContext.currentStep = 0;
     syncContext.totalSteps = 0;
     syncContext.uiProgressTimer.start();
@@ -1039,46 +1217,7 @@ bool MainWindow::startPairSync(int pairIndex, const QString &reason, bool should
     worker->moveToThread(thread);
     connect(thread, &QThread::finished, worker, &QObject::deleteLater);
     connect(thread, &QThread::finished, thread, &QObject::deleteLater);
-    connect(worker,
-            &FolderSyncWorker::sigSyncStarted,
-            this,
-            [this, pairIndex](qint64 totalSteps,
-                              int removeFileCount,
-                              int addFileCount,
-                              int updateFileCount,
-                              const QString &syncReason) {
-                handlePairSyncStarted(pairIndex,
-                                      totalSteps,
-                                      removeFileCount,
-                                      addFileCount,
-                                      updateFileCount,
-                                      syncReason);
-            },
-            Qt::QueuedConnection);
-    connect(worker,
-            &FolderSyncWorker::sigSyncProgress,
-            this,
-            [this, pairIndex](qint64 currentStep, qint64 totalSteps, const QString &currentItem) {
-                handlePairSyncProgress(pairIndex, currentStep, totalSteps, currentItem);
-            },
-            Qt::QueuedConnection);
-    connect(worker,
-            &FolderSyncWorker::sigSyncFinished,
-            this,
-            [this, pairIndex, thread](bool success, const QString &summary) {
-                handlePairSyncFinished(pairIndex, success, summary);
-                if (thread->isRunning()) {
-                    thread->quit();
-                }
-            },
-            Qt::QueuedConnection);
-    connect(worker,
-            &FolderSyncWorker::sigLogMessage,
-            this,
-            [this, pairIndex](const QString &message) {
-                appendLog(tr("第 %1 组：%2").arg(pairIndex + 1).arg(message));
-            },
-            Qt::QueuedConnection);
+    connectWorkerSignals(worker, workerKind, pairIndex, thread);
 
     updatePairProgress(pairIndex, 0, 0);
     updatePairStatus(pairIndex, tr("准备扫描"));
@@ -1106,6 +1245,18 @@ void MainWindow::kickoffPairSync(int pairIndex)
     }
 
     const FolderPairConfig &pairConfig = _folderPairConfigs.at(pairIndex);
+    if (syncContext.workerKind == E_HttpFolderSyncWorker) {
+        QMetaObject::invokeMethod(syncContext.worker,
+                                  "slotStartSync",
+                                  Qt::QueuedConnection,
+                                  Q_ARG(QString, pairConfig.sourcePath),
+                                  Q_ARG(QString, pairConfig.targetPath),
+                                  Q_ARG(QString, pairConfig.sourceAccessToken),
+                                  Q_ARG(QString, syncContext.reason),
+                                  Q_ARG(int, _compareMode));
+        return;
+    }
+
     QMetaObject::invokeMethod(syncContext.worker,
                               "slotStartSync",
                               Qt::QueuedConnection,
@@ -1114,6 +1265,66 @@ void MainWindow::kickoffPairSync(int pairIndex)
                               Q_ARG(QString, syncContext.reason),
                               Q_ARG(FolderSyncWorker::CompareMode,
                                     static_cast<FolderSyncWorker::CompareMode>(_compareMode)));
+}
+
+void MainWindow::connectWorkerSignals(QObject *worker, int workerKind, int pairIndex, QThread *thread)
+{
+    if (worker == nullptr || thread == nullptr) {
+        return;
+    }
+
+    auto onStarted = [this, pairIndex](qint64 totalSteps,
+                                       int removeFileCount,
+                                       int addFileCount,
+                                       int updateFileCount,
+                                       const QString &syncReason) {
+        handlePairSyncStarted(pairIndex,
+                              totalSteps,
+                              removeFileCount,
+                              addFileCount,
+                              updateFileCount,
+                              syncReason);
+    };
+    auto onProgress = [this, pairIndex](qint64 currentStep, qint64 totalSteps, const QString &currentItem) {
+        handlePairSyncProgress(pairIndex, currentStep, totalSteps, currentItem);
+    };
+    auto onFinished = [this, pairIndex, thread](bool success, const QString &summary) {
+        handlePairSyncFinished(pairIndex, success, summary);
+        if (thread->isRunning()) {
+            thread->quit();
+        }
+    };
+    auto onLog = [this, pairIndex](const QString &message) {
+        appendLog(tr("第 %1 组：%2").arg(pairIndex + 1).arg(message));
+    };
+
+    if (workerKind == E_HttpFolderSyncWorker) {
+        auto *httpWorker = qobject_cast<HttpFolderSyncWorker *>(worker);
+        connect(httpWorker, &HttpFolderSyncWorker::sigSyncStarted, this, onStarted, Qt::QueuedConnection);
+        connect(httpWorker, &HttpFolderSyncWorker::sigSyncProgress, this, onProgress, Qt::QueuedConnection);
+        connect(httpWorker, &HttpFolderSyncWorker::sigSyncFinished, this, onFinished, Qt::QueuedConnection);
+        connect(httpWorker, &HttpFolderSyncWorker::sigLogMessage, this, onLog, Qt::QueuedConnection);
+        return;
+    }
+
+    auto *folderWorker = qobject_cast<FolderSyncWorker *>(worker);
+    connect(folderWorker, &FolderSyncWorker::sigSyncStarted, this, onStarted, Qt::QueuedConnection);
+    connect(folderWorker, &FolderSyncWorker::sigSyncProgress, this, onProgress, Qt::QueuedConnection);
+    connect(folderWorker, &FolderSyncWorker::sigSyncFinished, this, onFinished, Qt::QueuedConnection);
+    connect(folderWorker, &FolderSyncWorker::sigLogMessage, this, onLog, Qt::QueuedConnection);
+}
+
+bool MainWindow::invokeWorkerCancel(QObject *worker, int workerKind)
+{
+    if (worker == nullptr) {
+        return false;
+    }
+
+    if (workerKind == E_HttpFolderSyncWorker) {
+        return QMetaObject::invokeMethod(worker, "slotCancelSync", Qt::QueuedConnection);
+    }
+
+    return QMetaObject::invokeMethod(worker, "slotCancelSync", Qt::QueuedConnection);
 }
 
 void MainWindow::handlePairSyncStarted(int pairIndex,
@@ -1405,7 +1616,7 @@ void MainWindow::cancelPairSync(int pairIndex)
         syncContext.thread->requestInterruption();
     }
     if (syncContext.worker != nullptr) {
-        syncContext.worker->slotCancelSync();
+        invokeWorkerCancel(syncContext.worker, syncContext.workerKind);
     }
 
     updatePairStatus(pairIndex, tr("正在取消"));
@@ -1482,8 +1693,8 @@ QWidget *MainWindow::createActionWidget(int pairIndex)
                                                            ? ButtonStyleKind::E_Warning
                                                            : ButtonStyleKind::E_Neutral,
                                                        palette));
-    editButton->setToolTip(tr("编辑这一组 A/B 路径"));
-    syncButton->setToolTip(tr("立即同步这一组路径"));
+    editButton->setToolTip(tr("编辑这一组同步配置"));
+    syncButton->setToolTip(tr("立即同步这一组配置"));
     toggleButton->setToolTip(_folderPairConfigs.at(pairIndex).isSyncEnabled ? tr("暂停这一组的自动同步和“同步全部”")
                                                                             : tr("恢复这一组的自动同步和“同步全部”"));
     if (isCurrentPairRunning) {
@@ -1524,12 +1735,31 @@ QString MainWindow::buildPairStateText(const FolderPairConfig &pairConfig) const
     return tr("%1 | %2").arg(enableText, statusText);
 }
 
+bool MainWindow::isHttpSourcePair(const FolderPairConfig &pairConfig) const
+{
+    return pairConfig.sourceType == E_HttpDirectorySource;
+}
+
+QString MainWindow::buildSourceDisplayText(const FolderPairConfig &pairConfig) const
+{
+    if (isHttpSourcePair(pairConfig)) {
+        return tr("[HTTP] %1").arg(pairConfig.sourcePath);
+    }
+
+    return QDir::toNativeSeparators(pairConfig.sourcePath);
+}
+
+QString MainWindow::buildTargetDisplayText(const FolderPairConfig &pairConfig) const
+{
+    return QDir::toNativeSeparators(pairConfig.targetPath);
+}
+
 QString MainWindow::buildPairDisplayText(const FolderPairConfig &pairConfig, int pairIndex) const
 {
     return tr("第 %1 组 [%2 -> %3]")
         .arg(pairIndex + 1)
-        .arg(QDir::toNativeSeparators(pairConfig.sourcePath))
-        .arg(QDir::toNativeSeparators(pairConfig.targetPath));
+        .arg(buildSourceDisplayText(pairConfig))
+        .arg(buildTargetDisplayText(pairConfig));
 }
 
 QString MainWindow::buildPairListSummaryText(const QVector<int> &pairIndexes) const
@@ -1551,7 +1781,7 @@ QString MainWindow::buildPairListSummaryText(const QVector<int> &pairIndexes) co
     return pairTexts.isEmpty() ? tr("无") : pairTexts.join(tr("； "));
 }
 
-QString MainWindow::normalizePath(const QString &path) const
+QString MainWindow::normalizeLocalPath(const QString &path) const
 {
     const QString trimmedPath = path.trimmed();
     if (trimmedPath.isEmpty()) {
@@ -1559,6 +1789,11 @@ QString MainWindow::normalizePath(const QString &path) const
     }
 
     return QDir::cleanPath(QFileInfo(trimmedPath).absoluteFilePath());
+}
+
+QString MainWindow::normalizeHttpSourceUrl(const QString &sourceUrl) const
+{
+    return normalizeHttpSourceUrlInternal(sourceUrl);
 }
 
 bool MainWindow::editPairConfig(FolderPairConfig *pairConfig, int ignoredIndex, const QString &windowTitle) const
@@ -1569,13 +1804,23 @@ bool MainWindow::editPairConfig(FolderPairConfig *pairConfig, int ignoredIndex, 
 
     PairEditDialog dialog(const_cast<MainWindow *>(this));
     dialog.setWindowTitle(windowTitle);
-    dialog.setSourcePath(pairConfig->sourcePath);
+    dialog.setSourceType(static_cast<PairSourceType>(pairConfig->sourceType));
+    dialog.setSourceLocation(pairConfig->sourcePath);
+    dialog.setSourceAccessToken(pairConfig->sourceAccessToken);
     dialog.setTargetPath(pairConfig->targetPath);
 
     while (dialog.exec() == QDialog::Accepted) {
         FolderPairConfig updatedConfig = *pairConfig;
-        updatedConfig.sourcePath = normalizePath(dialog.sourcePath());
-        updatedConfig.targetPath = normalizePath(dialog.targetPath());
+        updatedConfig.sourceType = dialog.sourceType();
+        const QString sourceLocation = dialog.sourceLocation();
+        if (updatedConfig.sourceType == E_HttpDirectorySource) {
+            const QString normalizedSourceUrl = normalizeHttpSourceUrl(sourceLocation);
+            updatedConfig.sourcePath = normalizedSourceUrl.isEmpty() ? sourceLocation.trimmed() : normalizedSourceUrl;
+        } else {
+            updatedConfig.sourcePath = normalizeLocalPath(sourceLocation);
+        }
+        updatedConfig.sourceAccessToken = dialog.sourceAccessToken();
+        updatedConfig.targetPath = normalizeLocalPath(dialog.targetPath());
         if (updatedConfig.statusText.isEmpty()) {
             updatedConfig.statusText = tr("待同步");
         }
@@ -1598,7 +1843,8 @@ bool MainWindow::validatePairConfig(const FolderPairConfig &pairConfig,
 {
     if (pairConfig.sourcePath.isEmpty()) {
         if (errorMessage != nullptr) {
-            *errorMessage = tr("请先填写 A 主目录。");
+            *errorMessage = pairConfig.sourceType == E_HttpDirectorySource ? tr("请先填写 HTTP 源地址。")
+                                                                           : tr("请先填写 A 主目录。");
         }
         return false;
     }
@@ -1610,12 +1856,14 @@ bool MainWindow::validatePairConfig(const FolderPairConfig &pairConfig,
         return false;
     }
 
-    const QFileInfo sourceInfo(pairConfig.sourcePath);
-    if (sourceInfo.exists() && !sourceInfo.isDir()) {
-        if (errorMessage != nullptr) {
-            *errorMessage = tr("A 主路径已存在但不是目录，path=%1").arg(pairConfig.sourcePath);
+    if (!isHttpSourcePair(pairConfig)) {
+        const QFileInfo sourceInfo(pairConfig.sourcePath);
+        if (sourceInfo.exists() && !sourceInfo.isDir()) {
+            if (errorMessage != nullptr) {
+                *errorMessage = tr("A 主路径已存在但不是目录，path=%1").arg(pairConfig.sourcePath);
+            }
+            return false;
         }
-        return false;
     }
 
     const QFileInfo targetInfo(pairConfig.targetPath);
@@ -1626,7 +1874,7 @@ bool MainWindow::validatePairConfig(const FolderPairConfig &pairConfig,
         return false;
     }
 
-    if (isSameOrNestedPath(pairConfig.sourcePath, pairConfig.targetPath)) {
+    if (!isHttpSourcePair(pairConfig) && isSameOrNestedPath(pairConfig.sourcePath, pairConfig.targetPath)) {
         if (errorMessage != nullptr) {
             *errorMessage = tr("同一组中的 A 和 B 不能相同，也不能互相嵌套，source=%1，target=%2")
                                 .arg(pairConfig.sourcePath, pairConfig.targetPath);
@@ -1640,9 +1888,13 @@ bool MainWindow::validatePairConfig(const FolderPairConfig &pairConfig,
         }
 
         const FolderPairConfig &existingPair = _folderPairConfigs.at(index);
-        const bool targetConflict = isSameOrNestedPath(pairConfig.targetPath, existingPair.targetPath)
-            || isSameOrNestedPath(pairConfig.targetPath, existingPair.sourcePath)
-            || isSameOrNestedPath(pairConfig.sourcePath, existingPair.targetPath);
+        bool targetConflict = isSameOrNestedPath(pairConfig.targetPath, existingPair.targetPath);
+        if (!isHttpSourcePair(existingPair)) {
+            targetConflict = targetConflict || isSameOrNestedPath(pairConfig.targetPath, existingPair.sourcePath);
+        }
+        if (!isHttpSourcePair(pairConfig)) {
+            targetConflict = targetConflict || isSameOrNestedPath(pairConfig.sourcePath, existingPair.targetPath);
+        }
         if (!targetConflict) {
             continue;
         }
@@ -1654,6 +1906,20 @@ bool MainWindow::validatePairConfig(const FolderPairConfig &pairConfig,
                     .arg(pairConfig.sourcePath, pairConfig.targetPath, existingPair.sourcePath, existingPair.targetPath);
         }
         return false;
+    }
+
+    if (isHttpSourcePair(pairConfig)) {
+        const QString normalizedSourceUrl = normalizeHttpSourceUrl(pairConfig.sourcePath);
+        const QUrl sourceUrl(normalizedSourceUrl);
+        if (normalizedSourceUrl.isEmpty()
+            || !sourceUrl.isValid()
+            || sourceUrl.scheme().isEmpty()
+            || sourceUrl.host().isEmpty()) {
+            if (errorMessage != nullptr) {
+                *errorMessage = tr("HTTP 源地址无效，url=%1").arg(pairConfig.sourcePath);
+            }
+            return false;
+        }
     }
 
     return true;

@@ -1,17 +1,20 @@
 #pragma once
 
+#include <QElapsedTimer>
 #include <QHash>
 #include <QMainWindow>
-#include <QElapsedTimer>
 #include <QVector>
 
 class FolderSyncWorker;
+class HttpFolderSyncWorker;
+class HttpSyncServer;
 class FolderWatcher;
 class QStandardItemModel;
 class QTimer;
 class QWidget;
 class QEvent;
 class QThread;
+class QObject;
 
 namespace Ui
 {
@@ -47,17 +50,28 @@ private slots:
     void slotAddPair();
     void slotRemoveSelectedPair();
     void slotPairSelectionChanged();
+    void slotStartHttpServer();
+    void slotStopHttpServer();
     void slotStartMonitoring();
     void slotStopMonitoring();
     void slotSyncAllPairs();
     void slotWatcherChanged(const QString &changedPath);
     void slotDebounceTimeout();
     void slotPeriodicCheck();
+    void slotHttpServerStateChanged(bool isRunning, quint16 listenPort);
 
 private:
+    enum WorkerKind
+    {
+        E_LocalFolderSyncWorker = 0,
+        E_HttpFolderSyncWorker = 1
+    };
+
     struct FolderPairConfig
     {
+        int sourceType = 0;
         QString sourcePath;
+        QString sourceAccessToken;
         QString targetPath;
         QString statusText;
         bool isSyncEnabled = true;
@@ -68,7 +82,8 @@ private:
     struct RunningSyncContext
     {
         QThread *thread = nullptr;
-        FolderSyncWorker *worker = nullptr;
+        QObject *worker = nullptr;
+        int workerKind = E_LocalFolderSyncWorker;
         qint64 currentStep = 0;
         qint64 totalSteps = 1;
         qint64 lastUiProgressValue = -1;
@@ -82,6 +97,7 @@ private:
     void loadSettings();
     void saveSettings() const;
     void applyButtonStyles();
+    void refreshHttpServerUi();
     void refreshPairTable();
     void refreshActionWidgets();
     void refreshWatcher();
@@ -96,6 +112,8 @@ private:
     void requestSyncByIndexes(const QVector<int> &pairIndexes, const QString &reason);
     bool startPairSync(int pairIndex, const QString &reason, bool shouldKickoffImmediately = true);
     void kickoffPairSync(int pairIndex);
+    void connectWorkerSignals(QObject *worker, int workerKind, int pairIndex, QThread *thread);
+    bool invokeWorkerCancel(QObject *worker, int workerKind);
     void handlePairSyncStarted(int pairIndex,
                                qint64 totalSteps,
                                int removeFileCount,
@@ -121,10 +139,14 @@ private:
     void cancelPairSync(int pairIndex);
     void togglePairSync(int pairIndex);
     QWidget *createActionWidget(int pairIndex);
+    bool isHttpSourcePair(const FolderPairConfig &pairConfig) const;
+    QString buildSourceDisplayText(const FolderPairConfig &pairConfig) const;
+    QString buildTargetDisplayText(const FolderPairConfig &pairConfig) const;
     QString buildPairStateText(const FolderPairConfig &pairConfig) const;
     QString buildPairDisplayText(const FolderPairConfig &pairConfig, int pairIndex) const;
     QString buildPairListSummaryText(const QVector<int> &pairIndexes) const;
-    QString normalizePath(const QString &path) const;
+    QString normalizeLocalPath(const QString &path) const;
+    QString normalizeHttpSourceUrl(const QString &sourceUrl) const;
     bool editPairConfig(FolderPairConfig *pairConfig, int ignoredIndex, const QString &windowTitle) const;
     bool validatePairConfig(const FolderPairConfig &pairConfig,
                             int ignoredIndex,
@@ -136,6 +158,7 @@ private:
     QTimer *_debounceTimer;
     QTimer *_periodicCheckTimer;
     FolderWatcher *_folderWatcher;
+    HttpSyncServer *_httpSyncServer;
     QVector<FolderPairConfig> _folderPairConfigs;
     QHash<int, RunningSyncContext> _runningSyncContexts;
     QHash<int, QString> _pendingSyncReasons;
@@ -143,4 +166,7 @@ private:
     int _compareMode;
     int _maxParallelSyncCount;
     QString _scheduledReason;
+    QString _httpServerRootPath;
+    QString _httpServerAccessToken;
+    quint16 _httpServerPort;
 };

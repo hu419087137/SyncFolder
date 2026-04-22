@@ -18,11 +18,102 @@
     <item>
      <widget class="QLabel" name="tipsLabel">
       <property name="text">
-       <string>同步规则：每一组都以 A 主目录为准，把对应的 B 备份目录校正到与 A 一致。支持新增多组同步对，并自动记住上一次配置的路径。</string>
+       <string>同步规则：支持“本地 A 目录 -&gt; 本地 B 目录”以及“HTTP 源目录 -&gt; 本地 B 目录”两种模式。启动监控后，会持续保持所有已启用同步对与源端一致，并自动记住上一次配置。</string>
       </property>
       <property name="wordWrap">
        <bool>true</bool>
       </property>
+     </widget>
+    </item>
+    <item>
+     <widget class="QGroupBox" name="httpServerGroupBox">
+      <property name="title">
+       <string>HTTP 同步服务（当前电脑作为 A 端）</string>
+      </property>
+      <layout class="QVBoxLayout" name="httpServerLayout">
+       <item>
+        <layout class="QGridLayout" name="httpServerGridLayout">
+         <item row="0" column="0">
+          <widget class="QLabel" name="httpServerRootLabel">
+           <property name="text">
+            <string>共享目录</string>
+           </property>
+          </widget>
+         </item>
+         <item row="0" column="1">
+          <widget class="QLineEdit" name="httpServerRootPathEdit"/>
+         </item>
+         <item row="0" column="2">
+          <widget class="QPushButton" name="browseHttpServerRootButton">
+           <property name="text">
+            <string>浏览...</string>
+           </property>
+          </widget>
+         </item>
+         <item row="1" column="0">
+          <widget class="QLabel" name="httpServerPortLabel">
+           <property name="text">
+            <string>端口</string>
+           </property>
+          </widget>
+         </item>
+         <item row="1" column="1">
+          <widget class="QSpinBox" name="httpServerPortSpinBox"/>
+         </item>
+         <item row="1" column="2">
+          <widget class="QLabel" name="httpServerTokenLabel">
+           <property name="text">
+            <string>访问令牌</string>
+           </property>
+          </widget>
+         </item>
+         <item row="1" column="3">
+          <widget class="QLineEdit" name="httpServerTokenEdit"/>
+         </item>
+        </layout>
+       </item>
+       <item>
+        <layout class="QHBoxLayout" name="httpServerButtonLayout">
+         <item>
+          <widget class="QPushButton" name="startHttpServerButton">
+           <property name="text">
+            <string>启动 HTTP 服务</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QPushButton" name="stopHttpServerButton">
+           <property name="text">
+            <string>停止 HTTP 服务</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <spacer name="httpServerButtonSpacer">
+           <property name="orientation">
+            <enum>Qt::Horizontal</enum>
+           </property>
+           <property name="sizeHint" stdset="0">
+            <size>
+             <width>40</width>
+             <height>20</height>
+            </size>
+           </property>
+          </spacer>
+         </item>
+        </layout>
+       </item>
+       <item>
+        <widget class="QLabel" name="httpServerEndpointLabel">
+         <property name="text">
+          <string>未启动。建议其他电脑填写本机显示的 http://IP:端口/api/v1 地址。</string>
+         </property>
+         <property name="wordWrap">
+          <bool>true</bool>
+         </property>
+        </widget>
+       </item>
+      </layout>
      </widget>
     </item>
     <item>

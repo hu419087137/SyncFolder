@@ -2,6 +2,8 @@
 
 #include <QDialog>
 
+#include "SyncTypes.h"
+
 namespace Ui
 {
 class PairEditDialog;
@@ -30,10 +32,16 @@ public:
     ~PairEditDialog() override;
 
     /**
-     * @brief 设置 A 主目录路径。
-     * @param sourcePath A 主目录绝对路径。
+     * @brief 设置同步源类型。
+     * @param sourceType 同步源类型。
      */
-    void setSourcePath(const QString &sourcePath);
+    void setSourceType(PairSourceType sourceType);
+
+    /**
+     * @brief 设置同步源位置。
+     * @param sourceLocation 本地模式下为目录路径，HTTP 模式下为服务地址。
+     */
+    void setSourceLocation(const QString &sourceLocation);
 
     /**
      * @brief 设置 B 备份目录路径。
@@ -42,10 +50,22 @@ public:
     void setTargetPath(const QString &targetPath);
 
     /**
-     * @brief 获取 A 主目录路径。
-     * @return A 主目录绝对路径。
+     * @brief 设置 HTTP 源访问令牌。
+     * @param sourceAccessToken 访问令牌；为空时表示不启用鉴权。
      */
-    QString sourcePath() const;
+    void setSourceAccessToken(const QString &sourceAccessToken);
+
+    /**
+     * @brief 获取同步源类型。
+     * @return 当前选择的同步源类型。
+     */
+    PairSourceType sourceType() const;
+
+    /**
+     * @brief 获取同步源位置。
+     * @return 本地模式下为规范化目录路径，HTTP 模式下为规范化服务地址。
+     */
+    QString sourceLocation() const;
 
     /**
      * @brief 获取 B 备份目录路径。
@@ -53,10 +73,19 @@ public:
      */
     QString targetPath() const;
 
+    /**
+     * @brief 获取 HTTP 源访问令牌。
+     * @return 访问令牌。
+     */
+    QString sourceAccessToken() const;
+
 private slots:
+    void slotSourceTypeChanged(int index);
     void slotBrowseSourceFolder();
     void slotBrowseTargetFolder();
 
 private:
+    void applySourceTypeUi(PairSourceType sourceType);
+
     Ui::PairEditDialog *_ui;
 };

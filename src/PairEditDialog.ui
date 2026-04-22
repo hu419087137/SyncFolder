@@ -6,8 +6,8 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>680</width>
-    <height>170</height>
+    <width>720</width>
+    <height>248</height>
    </rect>
   </property>
   <property name="windowTitle">
@@ -15,46 +15,93 @@
   </property>
   <layout class="QVBoxLayout" name="mainLayout">
    <item>
-    <layout class="QGridLayout" name="gridLayout">
+   <layout class="QGridLayout" name="gridLayout">
      <item row="0" column="0">
+      <widget class="QLabel" name="sourceTypeLabel">
+       <property name="text">
+        <string>源类型</string>
+       </property>
+      </widget>
+     </item>
+     <item row="0" column="1">
+      <widget class="QComboBox" name="sourceTypeComboBox"/>
+     </item>
+     <item row="0" column="2">
+      <spacer name="sourceTypeSpacer">
+       <property name="orientation">
+        <enum>Qt::Horizontal</enum>
+       </property>
+       <property name="sizeHint" stdset="0">
+        <size>
+         <width>40</width>
+         <height>20</height>
+        </size>
+       </property>
+      </spacer>
+     </item>
+     <item row="1" column="0">
       <widget class="QLabel" name="sourceLabel">
        <property name="text">
         <string>A 主目录</string>
        </property>
       </widget>
      </item>
-     <item row="0" column="1">
+     <item row="1" column="1">
       <widget class="QLineEdit" name="sourcePathEdit">
        <property name="placeholderText">
         <string>请输入或选择 A 主目录</string>
        </property>
       </widget>
      </item>
-     <item row="0" column="2">
+     <item row="1" column="2">
       <widget class="QPushButton" name="browseSourceButton">
        <property name="text">
         <string>浏览...</string>
        </property>
       </widget>
      </item>
-     <item row="1" column="0">
+     <item row="2" column="0">
+      <widget class="QLabel" name="sourceAccessTokenLabel">
+       <property name="text">
+        <string>访问令牌</string>
+       </property>
+      </widget>
+     </item>
+     <item row="2" column="1" colspan="2">
+      <widget class="QLineEdit" name="sourceAccessTokenEdit">
+       <property name="placeholderText">
+        <string>可选：填写远端 HTTP 服务访问令牌</string>
+       </property>
+      </widget>
+     </item>
+     <item row="3" column="0">
       <widget class="QLabel" name="targetLabel">
        <property name="text">
         <string>B 备份目录</string>
        </property>
       </widget>
      </item>
-     <item row="1" column="1">
+     <item row="3" column="1">
       <widget class="QLineEdit" name="targetPathEdit">
        <property name="placeholderText">
         <string>请输入或选择 B 备份目录</string>
        </property>
       </widget>
      </item>
-     <item row="1" column="2">
+     <item row="3" column="2">
       <widget class="QPushButton" name="browseTargetButton">
        <property name="text">
         <string>浏览...</string>
+       </property>
+      </widget>
+     </item>
+     <item row="4" column="0" colspan="3">
+      <widget class="QLabel" name="modeHintLabel">
+       <property name="text">
+        <string>本地模式会把当前电脑上的 A 主目录直接同步到 B 备份目录。</string>
+       </property>
+       <property name="wordWrap">
+        <bool>true</bool>
        </property>
       </widget>
      </item>

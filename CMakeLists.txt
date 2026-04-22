@@ -10,8 +10,8 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTOUIC ON)
 set(CMAKE_AUTORCC OFF)
 
-find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Widgets)
-find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets)
+find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Widgets Network HttpServer)
+find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets Network HttpServer)
 
 set(projectSources
     src/main.cpp
@@ -25,6 +25,11 @@ set(projectSources
     src/FolderSyncWorker.h
     src/FolderWatcher.cpp
     src/FolderWatcher.h
+    src/HttpFolderSyncWorker.cpp
+    src/HttpFolderSyncWorker.h
+    src/HttpSyncServer.cpp
+    src/HttpSyncServer.h
+    src/SyncTypes.h
 )
 
 if (QT_VERSION_MAJOR GREATER_EQUAL 6)
@@ -40,7 +45,11 @@ endif()
 
 target_include_directories(SyncFolder PRIVATE src)
 
-target_link_libraries(SyncFolder PRIVATE Qt${QT_VERSION_MAJOR}::Widgets)
+target_link_libraries(SyncFolder PRIVATE
+    Qt${QT_VERSION_MAJOR}::Widgets
+    Qt${QT_VERSION_MAJOR}::Network
+    Qt${QT_VERSION_MAJOR}::HttpServer
+)
 
 if (MSVC)
     target_compile_options(SyncFolder PRIVATE /utf-8)
