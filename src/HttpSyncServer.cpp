@@ -334,34 +334,69 @@ HttpSyncServer::~HttpSyncServer()
     stopServer();
 }
 
-bool HttpSyncServer::startServer(const QString &rootPath,
+bool HttpSyncServer::startServer(const QVector<SharedFolderConfig> &sharedFolderConfigs,
                                  quint16 listenPort,
                                  const QString &accessToken,
                                  QString *errorMessage)
 {
-    const QString normalizedRootPath = normalizeLocalPath(rootPath);
-    if (normalizedRootPath.isEmpty()) {
-        if (errorMessage != nullptr) {
-            *errorMessage = tr("HTTP 服务根目录不能为空。");
+    QVector<SharedFolderConfig> normalizedSharedFolderConfigs;
+    normalizedSharedFolderConfigs.reserve(sharedFolderConfigs.size());
+    QSet<QString> usedSourceIds;
+    for (const SharedFolderConfig &sharedFolderConfig : sharedFolderConfigs) {
+        SharedFolderConfig normalizedConfig;
+        normalizedConfig.id = sharedFolderConfig.id.trimmed();
+        normalizedConfig.name = sharedFolderConfig.name.trimmed();
+        normalizedConfig.rootPath = normalizeLocalPath(sharedFolderConfig.rootPath);
+        if (normalizedConfig.id.isEmpty()) {
+            if (errorMessage != nullptr) {
+                *errorMessage = tr("HTTP 共享目录 ID 不能为空，name=%1").arg(normalizedConfig.name);
+            }
+            return false;
         }
-        return false;
+        if (usedSourceIds.contains(normalizedConfig.id)) {
+            if (errorMessage != nullptr) {
+                *errorMessage = tr("HTTP 共享目录 ID 不能重复，sourceId=%1").arg(normalizedConfig.id);
+            }
+            return false;
+        }
+        usedSourceIds.insert(normalizedConfig.id);
+
+        if (normalizedConfig.name.isEmpty()) {
+            normalizedConfig.name = QFileInfo(normalizedConfig.rootPath).fileName();
+        }
+        if (normalizedConfig.name.isEmpty()) {
+            normalizedConfig.name = normalizedConfig.id;
+        }
+
+        const QFileInfo rootInfo(normalizedConfig.rootPath);
+        if (!rootInfo.exists() || !rootInfo.isDir()) {
+            if (errorMessage != nullptr) {
+                *errorMessage = tr("HTTP 共享目录不存在或不是目录，source=%1，path=%2")
+                                    .arg(normalizedConfig.name, normalizedConfig.rootPath);
+            }
+            return false;
+        }
+
+        normalizedSharedFolderConfigs.append(normalizedConfig);
     }
 
-    const QFileInfo rootInfo(normalizedRootPath);
-    if (!rootInfo.exists() || !rootInfo.isDir()) {
+    if (normalizedSharedFolderConfigs.isEmpty()) {
         if (errorMessage != nullptr) {
-            *errorMessage = tr("HTTP 服务根目录不存在或不是目录，path=%1").arg(normalizedRootPath);
+            *errorMessage = tr("HTTP 服务至少需要配置一个共享目录。");
         }
         return false;
     }
 
     stopServer();
 
-    _rootPath = normalizedRootPath;
+    _sharedFolderConfigs = normalizedSharedFolderConfigs;
     _accessToken = accessToken.trimmed();
     _listenPort = listenPort;
     _httpServer = new QHttpServer(this);
 
+    const bool sourcesRouteOk = _httpServer->route(
+        QStringLiteral("/api/v1/sources"),
+        [this](const QHttpServerRequest &request) { return handleSourcesRequest(request); });
     const bool manifestRouteOk = _httpServer->route(
         QStringLiteral("/api/v1/manifest"),
         [this](const QHttpServerRequest &request) { return handleManifestRequest(request); });
@@ -374,18 +409,19 @@ bool HttpSyncServer::startServer(const QString &rootPath,
         QJsonObject infoObject{
             {QStringLiteral("status"), QStringLiteral("ok")},
             {QStringLiteral("listenPort"), static_cast<int>(_listenPort)},
+            {QStringLiteral("sourceCount"), static_cast<int>(_sharedFolderConfigs.size())},
             {QStringLiteral("hasToken"), !_accessToken.isEmpty()}};
         QHttpServerResponse response(infoObject);
         response.setHeader(QByteArrayLiteral("Cache-Control"), QByteArrayLiteral("no-store"));
         return response;
     });
-    if (!manifestRouteOk || !fileRouteOk || !pingRouteOk) {
+    if (!sourcesRouteOk || !manifestRouteOk || !fileRouteOk || !pingRouteOk) {
         if (errorMessage != nullptr) {
             *errorMessage = tr("注册 HTTP 接口失败，请检查 QtHttpServer 路由配置。");
         }
         delete _httpServer;
         _httpServer = nullptr;
-        _rootPath.clear();
+        _sharedFolderConfigs.clear();
         _accessToken.clear();
         _listenPort = 0;
         return false;
@@ -398,15 +434,22 @@ bool HttpSyncServer::startServer(const QString &rootPath,
         }
         delete _httpServer;
         _httpServer = nullptr;
-        _rootPath.clear();
+        _sharedFolderConfigs.clear();
         _accessToken.clear();
         _listenPort = 0;
         return false;
     }
 
     _listenPort = actualListenPort;
-    emit sigLogMessage(tr("HTTP 同步服务已启动，root=%1，port=%2，鉴权=%3，urls=%4")
-                           .arg(QDir::toNativeSeparators(_rootPath))
+    QStringList sourceTexts;
+    sourceTexts.reserve(_sharedFolderConfigs.size());
+    for (const SharedFolderConfig &sharedFolderConfig : _sharedFolderConfigs) {
+        sourceTexts.append(tr("%1(%2)")
+                               .arg(sharedFolderConfig.name,
+                                    QDir::toNativeSeparators(sharedFolderConfig.rootPath)));
+    }
+    emit sigLogMessage(tr("HTTP 同步服务已启动，sources=%1，port=%2，鉴权=%3，urls=%4")
+                           .arg(sourceTexts.join(tr("； ")))
                            .arg(_listenPort)
                            .arg(_accessToken.isEmpty() ? tr("关闭") : tr("开启"))
                            .arg(endpointUrls().join(tr("； "))));
@@ -425,6 +468,7 @@ void HttpSyncServer::stopServer()
 
     const quint16 previousListenPort = _listenPort;
     _listenPort = 0;
+    _sharedFolderConfigs.clear();
     emit sigLogMessage(tr("HTTP 同步服务已停止，port=%1").arg(previousListenPort));
     emit sigServerStateChanged(false, 0);
 }
@@ -444,6 +488,26 @@ QStringList HttpSyncServer::endpointUrls() const
     return buildEndpointUrls(_listenPort);
 }
 
+QHttpServerResponse HttpSyncServer::handleSourcesRequest(const QHttpServerRequest &request)
+{
+    if (!isAuthorized(request)) {
+        return buildErrorResponse(static_cast<int>(QHttpServerResponse::StatusCode::Unauthorized),
+                                  tr("访问令牌无效。"));
+    }
+
+    QByteArray sourcesJson;
+    QString errorMessage;
+    if (!buildSourcesJson(&sourcesJson, &errorMessage)) {
+        emit sigLogMessage(errorMessage);
+        return buildErrorResponse(static_cast<int>(QHttpServerResponse::StatusCode::InternalServerError),
+                                  errorMessage);
+    }
+
+    QHttpServerResponse response(QByteArrayLiteral("application/json; charset=utf-8"), sourcesJson);
+    response.setHeader(QByteArrayLiteral("Cache-Control"), QByteArrayLiteral("no-store"));
+    return response;
+}
+
 QHttpServerResponse HttpSyncServer::handleManifestRequest(const QHttpServerRequest &request)
 {
     if (!isAuthorized(request)) {
@@ -451,9 +515,15 @@ QHttpServerResponse HttpSyncServer::handleManifestRequest(const QHttpServerReque
                                   tr("访问令牌无效。"));
     }
 
-    QByteArray manifestJson;
+    const SharedFolderConfig *sharedFolderConfig = nullptr;
     QString errorMessage;
-    if (!buildManifestJson(&manifestJson, &errorMessage)) {
+    if (!resolveSharedFolderFromRequest(request, &sharedFolderConfig, &errorMessage)) {
+        return buildErrorResponse(static_cast<int>(QHttpServerResponse::StatusCode::BadRequest),
+                                  errorMessage);
+    }
+
+    QByteArray manifestJson;
+    if (!buildManifestJson(*sharedFolderConfig, &manifestJson, &errorMessage)) {
         emit sigLogMessage(errorMessage);
         return buildErrorResponse(static_cast<int>(QHttpServerResponse::StatusCode::InternalServerError),
                                   errorMessage);
@@ -473,6 +543,15 @@ void HttpSyncServer::handleFileRequest(const QHttpServerRequest &request, QHttpS
         return;
     }
 
+    const SharedFolderConfig *sharedFolderConfig = nullptr;
+    QString sourceErrorMessage;
+    if (!resolveSharedFolderFromRequest(request, &sharedFolderConfig, &sourceErrorMessage)) {
+        writeErrorResponse(std::move(responder),
+                           static_cast<int>(QHttpServerResponse::StatusCode::BadRequest),
+                           sourceErrorMessage);
+        return;
+    }
+
     QString relativePath;
     if (!tryParseRelativeFilePath(request.query().queryItemValue(QStringLiteral("path")), &relativePath)) {
         writeErrorResponse(std::move(responder),
@@ -481,8 +560,8 @@ void HttpSyncServer::handleFileRequest(const QHttpServerRequest &request, QHttpS
         return;
     }
 
-    const QString absolutePath = QDir(_rootPath).absoluteFilePath(relativePath);
-    if (!isSameOrChildPath(_rootPath, absolutePath)) {
+    const QString absolutePath = QDir(sharedFolderConfig->rootPath).absoluteFilePath(relativePath);
+    if (!isSameOrChildPath(sharedFolderConfig->rootPath, absolutePath)) {
         writeErrorResponse(std::move(responder),
                            static_cast<int>(QHttpServerResponse::StatusCode::Forbidden),
                            tr("禁止访问目录外的文件。"));
@@ -533,6 +612,7 @@ void HttpSyncServer::handleFileRequest(const QHttpServerRequest &request, QHttpS
                          {QByteArrayLiteral("Cache-Control"), QByteArrayLiteral("no-store")},
                          {QByteArrayLiteral("Accept-Ranges"), QByteArrayLiteral("bytes")},
                          {QByteArrayLiteral("Content-Range"), contentRange},
+                         {QByteArrayLiteral("X-Sync-Source-Id"), sharedFolderConfig->id.toUtf8()},
                          {QByteArrayLiteral("X-Sync-Relative-Path"), relativePath.toUtf8()},
                          {QByteArrayLiteral("X-Sync-MTime-Ms"), QByteArray::number(modifiedTimeMs)}},
                         QHttpServerResponder::StatusCode::PartialContent);
@@ -544,6 +624,7 @@ void HttpSyncServer::handleFileRequest(const QHttpServerRequest &request, QHttpS
                     {{QByteArrayLiteral("Content-Type"), QByteArrayLiteral("application/octet-stream")},
                      {QByteArrayLiteral("Cache-Control"), QByteArrayLiteral("no-store")},
                      {QByteArrayLiteral("Accept-Ranges"), QByteArrayLiteral("bytes")},
+                     {QByteArrayLiteral("X-Sync-Source-Id"), sharedFolderConfig->id.toUtf8()},
                      {QByteArrayLiteral("X-Sync-Relative-Path"), relativePath.toUtf8()},
                      {QByteArrayLiteral("X-Sync-MTime-Ms"), QByteArray::number(modifiedTimeMs)}},
                     QHttpServerResponder::StatusCode::Ok);
@@ -573,7 +654,80 @@ bool HttpSyncServer::isAuthorized(const QHttpServerRequest &request) const
     return request.query().queryItemValue(QStringLiteral("token")).trimmed() == _accessToken;
 }
 
-bool HttpSyncServer::buildManifestJson(QByteArray *manifestJson, QString *errorMessage) const
+bool HttpSyncServer::resolveSharedFolderFromRequest(const QHttpServerRequest &request,
+                                                    const SharedFolderConfig **sharedFolderConfig,
+                                                    QString *errorMessage) const
+{
+    if (sharedFolderConfig == nullptr) {
+        if (errorMessage != nullptr) {
+            *errorMessage = tr("HTTP 共享目录输出参数不能为空。");
+        }
+        return false;
+    }
+
+    *sharedFolderConfig = nullptr;
+    if (_sharedFolderConfigs.isEmpty()) {
+        if (errorMessage != nullptr) {
+            *errorMessage = tr("HTTP 服务当前没有可同步目录。");
+        }
+        return false;
+    }
+
+    const QString sourceId = request.query().queryItemValue(QStringLiteral("sourceId")).trimmed();
+    if (sourceId.isEmpty()) {
+        if (_sharedFolderConfigs.size() == 1) {
+            *sharedFolderConfig = &_sharedFolderConfigs.first();
+            return true;
+        }
+
+        if (errorMessage != nullptr) {
+            *errorMessage = tr("HTTP 服务端配置了多个共享目录，请先指定 sourceId。");
+        }
+        return false;
+    }
+
+    for (const SharedFolderConfig &candidateConfig : _sharedFolderConfigs) {
+        if (candidateConfig.id == sourceId) {
+            *sharedFolderConfig = &candidateConfig;
+            return true;
+        }
+    }
+
+    if (errorMessage != nullptr) {
+        *errorMessage = tr("HTTP 共享目录不存在，sourceId=%1").arg(sourceId);
+    }
+    return false;
+}
+
+bool HttpSyncServer::buildSourcesJson(QByteArray *sourcesJson, QString *errorMessage) const
+{
+    if (sourcesJson == nullptr) {
+        if (errorMessage != nullptr) {
+            *errorMessage = tr("HTTP 目录列表输出参数不能为空。");
+        }
+        return false;
+    }
+
+    QJsonArray sourcesArray;
+    for (const SharedFolderConfig &sharedFolderConfig : _sharedFolderConfigs) {
+        sourcesArray.append(QJsonObject{{QStringLiteral("id"), sharedFolderConfig.id},
+                                        {QStringLiteral("name"), sharedFolderConfig.name},
+                                        {QStringLiteral("rootName"),
+                                         QFileInfo(sharedFolderConfig.rootPath).fileName()}});
+    }
+
+    const QJsonObject sourcesObject{
+        {QStringLiteral("version"), 1},
+        {QStringLiteral("generatedAtMs"), static_cast<double>(QDateTime::currentMSecsSinceEpoch())},
+        {QStringLiteral("sourceCount"), static_cast<int>(sourcesArray.size())},
+        {QStringLiteral("sources"), sourcesArray}};
+    *sourcesJson = QJsonDocument(sourcesObject).toJson(QJsonDocument::Compact);
+    return true;
+}
+
+bool HttpSyncServer::buildManifestJson(const SharedFolderConfig &sharedFolderConfig,
+                                       QByteArray *manifestJson,
+                                       QString *errorMessage) const
 {
     if (manifestJson == nullptr) {
         if (errorMessage != nullptr) {
@@ -582,9 +736,9 @@ bool HttpSyncServer::buildManifestJson(QByteArray *manifestJson, QString *errorM
         return false;
     }
 
-    QDir rootDir(_rootPath);
+    QDir rootDir(sharedFolderConfig.rootPath);
     QVector<ManifestEntry> manifestEntries;
-    QDirIterator iterator(_rootPath,
+    QDirIterator iterator(sharedFolderConfig.rootPath,
                           QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System,
                           QDirIterator::Subdirectories);
     while (iterator.hasNext()) {
@@ -592,8 +746,8 @@ bool HttpSyncServer::buildManifestJson(QByteArray *manifestJson, QString *errorM
         const QFileInfo fileInfo = iterator.fileInfo();
         if (fileInfo.isSymLink()) {
             if (errorMessage != nullptr) {
-                *errorMessage = tr("HTTP 服务根目录内存在不支持的符号链接，path=%1")
-                                    .arg(fileInfo.absoluteFilePath());
+                *errorMessage = tr("HTTP 共享目录内存在不支持的符号链接，source=%1，path=%2")
+                                    .arg(sharedFolderConfig.name, fileInfo.absoluteFilePath());
             }
             return false;
         }
@@ -611,8 +765,8 @@ bool HttpSyncServer::buildManifestJson(QByteArray *manifestJson, QString *errorM
         }
 
         if (errorMessage != nullptr) {
-            *errorMessage = tr("HTTP 服务根目录内存在不支持的文件类型，path=%1")
-                                .arg(fileInfo.absoluteFilePath());
+            *errorMessage = tr("HTTP 共享目录内存在不支持的文件类型，source=%1，path=%2")
+                                .arg(sharedFolderConfig.name, fileInfo.absoluteFilePath());
         }
         return false;
     }
@@ -636,7 +790,9 @@ bool HttpSyncServer::buildManifestJson(QByteArray *manifestJson, QString *errorM
     const QJsonObject manifestObject{
         {QStringLiteral("version"), 1},
         {QStringLiteral("generatedAtMs"), static_cast<double>(QDateTime::currentMSecsSinceEpoch())},
-        {QStringLiteral("rootName"), QFileInfo(_rootPath).fileName()},
+        {QStringLiteral("sourceId"), sharedFolderConfig.id},
+        {QStringLiteral("sourceName"), sharedFolderConfig.name},
+        {QStringLiteral("rootName"), QFileInfo(sharedFolderConfig.rootPath).fileName()},
         {QStringLiteral("entryCount"), static_cast<int>(manifestEntries.size())},
         {QStringLiteral("entries"), entriesJson}};
     *manifestJson = QJsonDocument(manifestObject).toJson(QJsonDocument::Compact);

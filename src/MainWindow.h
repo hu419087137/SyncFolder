@@ -3,13 +3,17 @@
 #include <QElapsedTimer>
 #include <QHash>
 #include <QMainWindow>
+#include <QPointer>
 #include <QVector>
 
 class FolderSyncWorker;
 class HttpFolderSyncWorker;
 class HttpSyncServer;
 class FolderWatcher;
+class QNetworkAccessManager;
+class QNetworkReply;
 class QStandardItemModel;
+class QTableView;
 class QTimer;
 class QWidget;
 class QEvent;
@@ -49,12 +53,22 @@ protected:
 private slots:
     void slotAddPair();
     void slotRemoveSelectedPair();
+    void slotRemoveSelectedHttpClientPair();
     void slotPairSelectionChanged();
+    void slotHttpClientPairSelectionChanged();
     void slotStartHttpServer();
     void slotStopHttpServer();
+    void slotAddHttpSharedFolder();
+    void slotEditHttpSharedFolder();
+    void slotRemoveSelectedHttpSharedFolder();
+    void slotFetchHttpClientSources();
+    void slotHttpClientSourceReplyFinished();
+    void slotBrowseHttpClientTargetRoot();
+    void slotAddSelectedHttpClientSources();
     void slotStartMonitoring();
     void slotStopMonitoring();
     void slotSyncAllPairs();
+    void slotSyncAllHttpClientPairs();
     void slotWatcherChanged(const QString &changedPath);
     void slotDebounceTimeout();
     void slotPeriodicCheck();
@@ -72,11 +86,27 @@ private:
         int sourceType = 0;
         QString sourcePath;
         QString sourceAccessToken;
+        QString remoteSourceId;
+        QString remoteSourceName;
         QString targetPath;
         QString statusText;
         bool isSyncEnabled = true;
         qint64 progressValue = 0;
         qint64 progressMaximum = 1;
+    };
+
+    struct HttpSharedFolderConfig
+    {
+        QString id;
+        QString name;
+        QString rootPath;
+    };
+
+    struct HttpRemoteSourceConfig
+    {
+        QString id;
+        QString name;
+        QString rootName;
     };
 
     struct RunningSyncContext
@@ -98,6 +128,8 @@ private:
     void saveSettings() const;
     void applyButtonStyles();
     void refreshHttpServerUi();
+    void refreshHttpSharedFolderTable();
+    void refreshHttpClientSourceTable();
     void refreshPairTable();
     void refreshActionWidgets();
     void refreshWatcher();
@@ -130,15 +162,23 @@ private:
     int runningSyncCount() const;
     int maxParallelSyncCount() const;
     QVector<int> buildEnabledPairIndexes() const;
+    QVector<int> buildEnabledPairIndexes(int sourceType) const;
+    QVector<int> buildPairIndexesBySourceType(int sourceType) const;
     QVector<int> normalizePairIndexes(const QVector<int> &pairIndexes) const;
     int currentSelectedPairIndex() const;
+    int currentSelectedHttpClientPairIndex() const;
+    int currentSelectedPairIndex(const QTableView *tableView, const QVector<int> &pairIndexes) const;
     void selectPairRow(int pairIndex) const;
+    void selectPairRow(QTableView *tableView,
+                       QStandardItemModel *tableModel,
+                       const QVector<int> &pairIndexes,
+                       int pairIndex) const;
     void addPair();
     void editPair(int pairIndex);
     void syncPair(int pairIndex);
     void cancelPairSync(int pairIndex);
     void togglePairSync(int pairIndex);
-    QWidget *createActionWidget(int pairIndex);
+    QWidget *createActionWidget(QTableView *ownerTableView, int pairIndex);
     bool isHttpSourcePair(const FolderPairConfig &pairConfig) const;
     QString buildSourceDisplayText(const FolderPairConfig &pairConfig) const;
     QString buildTargetDisplayText(const FolderPairConfig &pairConfig) const;
@@ -147,26 +187,39 @@ private:
     QString buildPairListSummaryText(const QVector<int> &pairIndexes) const;
     QString normalizeLocalPath(const QString &path) const;
     QString normalizeHttpSourceUrl(const QString &sourceUrl) const;
+    QString buildHttpClientSourceListUrl(const QString &sourceUrl) const;
+    QString buildHttpClientImportPath(const HttpRemoteSourceConfig &remoteSourceConfig) const;
+    bool validateHttpSharedFolderConfig(const HttpSharedFolderConfig &sharedFolderConfig,
+                                        int ignoredIndex,
+                                        QString *errorMessage) const;
     bool editPairConfig(FolderPairConfig *pairConfig, int ignoredIndex, const QString &windowTitle) const;
     bool validatePairConfig(const FolderPairConfig &pairConfig,
                             int ignoredIndex,
                             QString *errorMessage) const;
-    bool validateConfiguration(QString *errorMessage) const;
 
     Ui::MainWindow *_ui;
-    QStandardItemModel *_pairTableModel;
+    QStandardItemModel *_localPairTableModel;
+    QStandardItemModel *_httpClientPairTableModel;
     QTimer *_debounceTimer;
     QTimer *_periodicCheckTimer;
     FolderWatcher *_folderWatcher;
     HttpSyncServer *_httpSyncServer;
+    QNetworkAccessManager *_httpClientCatalogNetworkAccessManager;
+    QPointer<QNetworkReply> _activeHttpClientCatalogReply;
     QVector<FolderPairConfig> _folderPairConfigs;
+    QVector<HttpSharedFolderConfig> _httpSharedFolderConfigs;
+    QVector<HttpRemoteSourceConfig> _httpRemoteSourceConfigs;
+    QVector<int> _localPairIndexes;
+    QVector<int> _httpClientPairIndexes;
     QHash<int, RunningSyncContext> _runningSyncContexts;
     QHash<int, QString> _pendingSyncReasons;
     bool _isMonitoring;
     int _compareMode;
     int _maxParallelSyncCount;
     QString _scheduledReason;
-    QString _httpServerRootPath;
     QString _httpServerAccessToken;
+    QString _httpClientServerUrl;
+    QString _httpClientAccessToken;
+    QString _httpClientTargetRootPath;
     quint16 _httpServerPort;
 };

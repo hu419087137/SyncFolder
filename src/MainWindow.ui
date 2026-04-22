@@ -16,205 +16,26 @@
   <widget class="QWidget" name="centralWidget">
    <layout class="QVBoxLayout" name="mainLayout">
     <item>
-     <widget class="QLabel" name="tipsLabel">
-      <property name="text">
-       <string>同步规则：支持“本地 A 目录 -&gt; 本地 B 目录”以及“HTTP 源目录 -&gt; 本地 B 目录”两种模式。启动监控后，会持续保持所有已启用同步对与源端一致，并自动记住上一次配置。</string>
+     <widget class="QTabWidget" name="mainTabWidget">
+      <property name="currentIndex">
+       <number>0</number>
       </property>
-      <property name="wordWrap">
-       <bool>true</bool>
-      </property>
+      <widget class="LocalSyncTabWidget" name="localSyncTab">
+       <attribute name="title">
+        <string>本地文件夹同步</string>
+       </attribute>
+      </widget>
+      <widget class="HttpServerTabWidget" name="httpServerTab">
+       <attribute name="title">
+        <string>HTTP 服务端</string>
+       </attribute>
+      </widget>
+      <widget class="HttpClientTabWidget" name="httpClientTab">
+       <attribute name="title">
+        <string>HTTP 客户端</string>
+       </attribute>
+      </widget>
      </widget>
-    </item>
-    <item>
-     <widget class="QGroupBox" name="httpServerGroupBox">
-      <property name="title">
-       <string>HTTP 同步服务（当前电脑作为 A 端）</string>
-      </property>
-      <layout class="QVBoxLayout" name="httpServerLayout">
-       <item>
-        <layout class="QGridLayout" name="httpServerGridLayout">
-         <item row="0" column="0">
-          <widget class="QLabel" name="httpServerRootLabel">
-           <property name="text">
-            <string>共享目录</string>
-           </property>
-          </widget>
-         </item>
-         <item row="0" column="1">
-          <widget class="QLineEdit" name="httpServerRootPathEdit"/>
-         </item>
-         <item row="0" column="2">
-          <widget class="QPushButton" name="browseHttpServerRootButton">
-           <property name="text">
-            <string>浏览...</string>
-           </property>
-          </widget>
-         </item>
-         <item row="1" column="0">
-          <widget class="QLabel" name="httpServerPortLabel">
-           <property name="text">
-            <string>端口</string>
-           </property>
-          </widget>
-         </item>
-         <item row="1" column="1">
-          <widget class="QSpinBox" name="httpServerPortSpinBox"/>
-         </item>
-         <item row="1" column="2">
-          <widget class="QLabel" name="httpServerTokenLabel">
-           <property name="text">
-            <string>访问令牌</string>
-           </property>
-          </widget>
-         </item>
-         <item row="1" column="3">
-          <widget class="QLineEdit" name="httpServerTokenEdit"/>
-         </item>
-        </layout>
-       </item>
-       <item>
-        <layout class="QHBoxLayout" name="httpServerButtonLayout">
-         <item>
-          <widget class="QPushButton" name="startHttpServerButton">
-           <property name="text">
-            <string>启动 HTTP 服务</string>
-           </property>
-          </widget>
-         </item>
-         <item>
-          <widget class="QPushButton" name="stopHttpServerButton">
-           <property name="text">
-            <string>停止 HTTP 服务</string>
-           </property>
-          </widget>
-         </item>
-         <item>
-          <spacer name="httpServerButtonSpacer">
-           <property name="orientation">
-            <enum>Qt::Horizontal</enum>
-           </property>
-           <property name="sizeHint" stdset="0">
-            <size>
-             <width>40</width>
-             <height>20</height>
-            </size>
-           </property>
-          </spacer>
-         </item>
-        </layout>
-       </item>
-       <item>
-        <widget class="QLabel" name="httpServerEndpointLabel">
-         <property name="text">
-          <string>未启动。建议其他电脑填写本机显示的 http://IP:端口/api/v1 地址。</string>
-         </property>
-         <property name="wordWrap">
-          <bool>true</bool>
-         </property>
-        </widget>
-       </item>
-      </layout>
-     </widget>
-    </item>
-    <item>
-     <widget class="QGroupBox" name="pairGroupBox">
-      <property name="title">
-       <string>同步对配置</string>
-      </property>
-      <layout class="QVBoxLayout" name="pairGroupLayout">
-       <item>
-        <layout class="QHBoxLayout" name="pairActionLayout">
-         <item>
-          <widget class="QPushButton" name="addPairButton">
-           <property name="text">
-            <string>新增同步对</string>
-           </property>
-          </widget>
-         </item>
-         <item>
-          <widget class="QPushButton" name="removePairButton">
-           <property name="text">
-            <string>删除选中项</string>
-           </property>
-          </widget>
-         </item>
-         <item>
-          <spacer name="pairActionSpacer">
-           <property name="orientation">
-            <enum>Qt::Horizontal</enum>
-           </property>
-           <property name="sizeHint" stdset="0">
-            <size>
-             <width>40</width>
-             <height>20</height>
-            </size>
-           </property>
-          </spacer>
-         </item>
-        </layout>
-       </item>
-      <item>
-       <widget class="QTableView" name="pairTableView">
-         <property name="alternatingRowColors">
-          <bool>true</bool>
-         </property>
-         <property name="selectionMode">
-          <enum>QAbstractItemView::SingleSelection</enum>
-         </property>
-         <property name="selectionBehavior">
-          <enum>QAbstractItemView::SelectRows</enum>
-         </property>
-         <property name="editTriggers">
-          <set>QAbstractItemView::NoEditTriggers</set>
-         </property>
-       </widget>
-      </item>
-     </layout>
-    </widget>
-    </item>
-    <item>
-     <layout class="QHBoxLayout" name="buttonLayout">
-      <item>
-       <widget class="QPushButton" name="startMonitorButton">
-        <property name="text">
-         <string>启动全部监控</string>
-        </property>
-       </widget>
-      </item>
-      <item>
-       <widget class="QPushButton" name="stopMonitorButton">
-        <property name="text">
-         <string>停止监控</string>
-        </property>
-       </widget>
-      </item>
-      <item>
-       <widget class="QPushButton" name="syncAllPairsButton">
-        <property name="text">
-         <string>同步全部</string>
-        </property>
-       </widget>
-      </item>
-      <item>
-       <widget class="QComboBox" name="maxParallelSyncComboBox"/>
-      </item>
-      <item>
-       <widget class="QComboBox" name="compareModeComboBox"/>
-      </item>
-      <item>
-       <spacer name="buttonSpacer">
-        <property name="orientation">
-         <enum>Qt::Horizontal</enum>
-        </property>
-        <property name="sizeHint" stdset="0">
-         <size>
-          <width>40</width>
-          <height>20</height>
-         </size>
-        </property>
-       </spacer>
-      </item>
-     </layout>
     </item>
     <item>
      <widget class="QGroupBox" name="logGroupBox">
@@ -238,6 +59,23 @@
    </layout>
   </widget>
  </widget>
+ <customwidgets>
+  <customwidget>
+   <class>LocalSyncTabWidget</class>
+   <extends>QWidget</extends>
+   <header>LocalSyncTabWidget.h</header>
+  </customwidget>
+  <customwidget>
+   <class>HttpServerTabWidget</class>
+   <extends>QWidget</extends>
+   <header>HttpServerTabWidget.h</header>
+  </customwidget>
+  <customwidget>
+   <class>HttpClientTabWidget</class>
+   <extends>QWidget</extends>
+   <header>HttpClientTabWidget.h</header>
+  </customwidget>
+ </customwidgets>
  <resources/>
  <connections/>
 </ui>

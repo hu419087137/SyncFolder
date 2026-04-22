@@ -1,0 +1,120 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>LocalSyncTabWidget</class>
+ <widget class="QWidget" name="LocalSyncTabWidget">
+  <layout class="QVBoxLayout" name="mainLayout">
+   <item>
+    <widget class="QLabel" name="tipsLabel">
+     <property name="text">
+      <string>本地模式用于“当前电脑 A 主目录 -&gt; 当前电脑 B 备份目录”同步。启动监控后，只监听本地 A 目录变化，并自动校正所有已启用同步对。</string>
+     </property>
+     <property name="wordWrap">
+      <bool>true</bool>
+     </property>
+    </widget>
+   </item>
+   <item>
+    <widget class="QGroupBox" name="pairGroupBox">
+     <property name="title">
+      <string>本地同步对</string>
+     </property>
+     <layout class="QVBoxLayout" name="pairGroupLayout">
+      <item>
+       <layout class="QHBoxLayout" name="pairActionLayout">
+        <item>
+         <widget class="QPushButton" name="addPairButton">
+          <property name="text">
+           <string>新增本地同步对</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QPushButton" name="removePairButton">
+          <property name="text">
+           <string>删除选中项</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <spacer name="pairActionSpacer">
+          <property name="orientation">
+           <enum>Qt::Horizontal</enum>
+          </property>
+          <property name="sizeHint" stdset="0">
+           <size>
+            <width>40</width>
+            <height>20</height>
+           </size>
+          </property>
+         </spacer>
+        </item>
+       </layout>
+      </item>
+      <item>
+       <widget class="QTableView" name="pairTableView">
+        <property name="alternatingRowColors">
+         <bool>true</bool>
+        </property>
+        <property name="selectionMode">
+         <enum>QAbstractItemView::SingleSelection</enum>
+        </property>
+        <property name="selectionBehavior">
+         <enum>QAbstractItemView::SelectRows</enum>
+        </property>
+        <property name="editTriggers">
+         <set>QAbstractItemView::NoEditTriggers</set>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item>
+    <layout class="QHBoxLayout" name="buttonLayout">
+     <item>
+      <widget class="QPushButton" name="startMonitorButton">
+       <property name="text">
+        <string>启动全部监控</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QPushButton" name="stopMonitorButton">
+       <property name="text">
+        <string>停止监控</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QPushButton" name="syncAllPairsButton">
+       <property name="text">
+        <string>同步全部</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QComboBox" name="maxParallelSyncComboBox"/>
+     </item>
+     <item>
+      <widget class="QComboBox" name="compareModeComboBox"/>
+     </item>
+     <item>
+      <spacer name="buttonSpacer">
+       <property name="orientation">
+        <enum>Qt::Horizontal</enum>
+       </property>
+       <property name="sizeHint" stdset="0">
+        <size>
+         <width>40</width>
+         <height>20</height>
+        </size>
+       </property>
+      </spacer>
+     </item>
+    </layout>
+   </item>
+  </layout>
+ </widget>
+ <resources/>
+ <connections/>
+</ui>

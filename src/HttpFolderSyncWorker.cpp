@@ -287,7 +287,7 @@ QString normalizeHttpSourceUrl(const QString &sourceUrl, QString *errorMessage)
     return url.toString(QUrl::RemoveQuery | QUrl::RemoveFragment);
 }
 
-QUrl buildManifestUrl(const QString &normalizedSourceUrl)
+QUrl buildManifestUrl(const QString &normalizedSourceUrl, const QString &remoteSourceId)
 {
     QUrl manifestUrl(normalizedSourceUrl);
     QString path = manifestUrl.path();
@@ -295,12 +295,18 @@ QUrl buildManifestUrl(const QString &normalizedSourceUrl)
         path += QStringLiteral("/manifest");
     }
     manifestUrl.setPath(path);
-    manifestUrl.setQuery(QString());
+    QUrlQuery query;
+    if (!remoteSourceId.trimmed().isEmpty()) {
+        query.addQueryItem(QStringLiteral("sourceId"), remoteSourceId.trimmed());
+    }
+    manifestUrl.setQuery(query);
     manifestUrl.setFragment(QString());
     return manifestUrl;
 }
 
-QUrl buildFileUrl(const QString &normalizedSourceUrl, const QString &relativePath)
+QUrl buildFileUrl(const QString &normalizedSourceUrl,
+                  const QString &relativePath,
+                  const QString &remoteSourceId)
 {
     QUrl fileUrl(normalizedSourceUrl);
     QString path = fileUrl.path();
@@ -311,6 +317,9 @@ QUrl buildFileUrl(const QString &normalizedSourceUrl, const QString &relativePat
 
     QUrlQuery query;
     query.addQueryItem(QStringLiteral("path"), relativePath);
+    if (!remoteSourceId.trimmed().isEmpty()) {
+        query.addQueryItem(QStringLiteral("sourceId"), remoteSourceId.trimmed());
+    }
     fileUrl.setQuery(query);
     fileUrl.setFragment(QString());
     return fileUrl;
@@ -747,6 +756,7 @@ bool parseManifest(const QByteArray &manifestJson,
 bool buildSyncPlan(const QVector<ManifestEntry> &manifestEntries,
                    const QString &normalizedTargetPath,
                    const QString &normalizedSourceUrl,
+                   const QString &remoteSourceId,
                    QVector<SyncOperation> *operations,
                    SyncPlanStats *planStats,
                    const std::function<void(const PlanStageProgress &)> &stageCallback,
@@ -910,7 +920,9 @@ bool buildSyncPlan(const QVector<ManifestEntry> &manifestEntries,
                 appendUniqueOperation({SyncOperationType::E_DownloadFile,
                                        targetAbsolutePath,
                                        manifestEntry.relativePath,
-                                       buildFileUrl(normalizedSourceUrl, manifestEntry.relativePath),
+                                       buildFileUrl(normalizedSourceUrl,
+                                                    manifestEntry.relativePath,
+                                                    remoteSourceId),
                                        calculateDownloadProgressUnits(manifestEntry.fileSize),
                                        manifestEntry.fileSize,
                                        manifestEntry.modifiedTimeMs},
@@ -1660,6 +1672,7 @@ void HttpFolderSyncWorker::slotCancelSync()
 }
 
 void HttpFolderSyncWorker::slotStartSync(const QString &sourceUrl,
+                                         const QString &remoteSourceId,
                                          const QString &targetPath,
                                          const QString &accessToken,
                                          const QString &reason,
@@ -1674,9 +1687,10 @@ void HttpFolderSyncWorker::slotStartSync(const QString &sourceUrl,
 
     QString errorMessage;
     const QString normalizedSourceUrl = normalizeHttpSourceUrl(sourceUrl, &errorMessage);
+    const QString normalizedRemoteSourceId = remoteSourceId.trimmed();
     const QString normalizedTargetPath = normalizeLocalPath(targetPath);
-    emit sigLogMessage(QObject::tr("收到 HTTP 同步请求，reason=%1，source=%2，target=%3")
-                           .arg(reason, normalizedSourceUrl, normalizedTargetPath));
+    emit sigLogMessage(QObject::tr("收到 HTTP 同步请求，reason=%1，source=%2，sourceId=%3，target=%4")
+                           .arg(reason, normalizedSourceUrl, normalizedRemoteSourceId, normalizedTargetPath));
     emit sigLogMessage(summarizeCompareMode(compareMode));
 
     if (!errorMessage.isEmpty()) {
@@ -1713,7 +1727,7 @@ void HttpFolderSyncWorker::slotStartSync(const QString &sourceUrl,
 
     emit sigSyncProgress(0, 0, QObject::tr("正在获取远端清单"));
     QByteArray manifestJson;
-    if (!requestExecutor.get(buildManifestUrl(normalizedSourceUrl),
+    if (!requestExecutor.get(buildManifestUrl(normalizedSourceUrl, normalizedRemoteSourceId),
                              accessToken,
                              [this](qint64 receivedBytes, qint64 totalBytes) {
                                  emit sigSyncProgress(0,
@@ -1740,6 +1754,7 @@ void HttpFolderSyncWorker::slotStartSync(const QString &sourceUrl,
     if (!buildSyncPlan(manifestEntries,
                        normalizedTargetPath,
                        normalizedSourceUrl,
+                       normalizedRemoteSourceId,
                        &operations,
                        &planStats,
                        [this](const PlanStageProgress &progress) {

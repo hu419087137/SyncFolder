@@ -1,0 +1,174 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>HttpServerTabWidget</class>
+ <widget class="QWidget" name="HttpServerTabWidget">
+  <layout class="QVBoxLayout" name="mainLayout">
+   <item>
+    <widget class="QLabel" name="tipsLabel">
+     <property name="text">
+      <string>HTTP 服务端用于把当前电脑上的多个目录作为可拉取同步源发布出去。其他电脑填写这里显示的 URL 后，就能查看并选择可同步目录。</string>
+     </property>
+     <property name="wordWrap">
+      <bool>true</bool>
+     </property>
+    </widget>
+   </item>
+   <item>
+    <widget class="QGroupBox" name="sharedFolderGroupBox">
+     <property name="title">
+      <string>共享目录列表</string>
+     </property>
+     <layout class="QVBoxLayout" name="sharedFolderLayout">
+      <item>
+       <layout class="QHBoxLayout" name="sharedFolderButtonLayout">
+        <item>
+         <widget class="QPushButton" name="addSharedFolderButton">
+          <property name="text">
+           <string>新增共享目录</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QPushButton" name="editSharedFolderButton">
+          <property name="text">
+           <string>编辑选中项</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QPushButton" name="removeSharedFolderButton">
+          <property name="text">
+           <string>删除选中项</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <spacer name="sharedFolderSpacer">
+          <property name="orientation">
+           <enum>Qt::Horizontal</enum>
+          </property>
+          <property name="sizeHint" stdset="0">
+           <size>
+            <width>40</width>
+            <height>20</height>
+           </size>
+          </property>
+         </spacer>
+        </item>
+       </layout>
+      </item>
+      <item>
+       <widget class="QTableWidget" name="sharedFolderTableWidget">
+        <property name="selectionMode">
+         <enum>QAbstractItemView::SingleSelection</enum>
+        </property>
+        <property name="selectionBehavior">
+         <enum>QAbstractItemView::SelectRows</enum>
+        </property>
+        <property name="editTriggers">
+         <set>QAbstractItemView::NoEditTriggers</set>
+        </property>
+        <column>
+         <property name="text">
+          <string>目录名称</string>
+         </property>
+        </column>
+        <column>
+         <property name="text">
+          <string>本地目录</string>
+         </property>
+        </column>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item>
+    <widget class="QGroupBox" name="serverConfigGroupBox">
+     <property name="title">
+      <string>HTTP 服务配置</string>
+     </property>
+     <layout class="QVBoxLayout" name="serverConfigLayout">
+      <item>
+       <layout class="QGridLayout" name="serverGridLayout">
+        <item row="0" column="0">
+         <widget class="QLabel" name="httpServerPortLabel">
+          <property name="text">
+           <string>端口</string>
+          </property>
+         </widget>
+        </item>
+        <item row="0" column="1">
+         <widget class="QSpinBox" name="httpServerPortSpinBox"/>
+        </item>
+        <item row="0" column="2">
+         <widget class="QLabel" name="httpServerTokenLabel">
+          <property name="text">
+           <string>访问令牌</string>
+          </property>
+         </widget>
+        </item>
+        <item row="0" column="3">
+         <widget class="QLineEdit" name="httpServerTokenEdit"/>
+        </item>
+       </layout>
+      </item>
+      <item>
+       <layout class="QHBoxLayout" name="serverButtonLayout">
+        <item>
+         <widget class="QPushButton" name="startHttpServerButton">
+          <property name="text">
+           <string>启动 HTTP 服务</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QPushButton" name="stopHttpServerButton">
+          <property name="text">
+           <string>停止 HTTP 服务</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <spacer name="serverButtonSpacer">
+          <property name="orientation">
+           <enum>Qt::Horizontal</enum>
+          </property>
+          <property name="sizeHint" stdset="0">
+           <size>
+            <width>40</width>
+            <height>20</height>
+           </size>
+          </property>
+         </spacer>
+        </item>
+       </layout>
+      </item>
+      <item>
+       <widget class="QLabel" name="httpServerEndpointLabel">
+        <property name="text">
+         <string>当前 HTTP URL</string>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QPlainTextEdit" name="httpServerEndpointEdit">
+        <property name="minimumSize">
+         <size>
+          <width>0</width>
+          <height>110</height>
+         </size>
+        </property>
+        <property name="readOnly">
+         <bool>true</bool>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+  </layout>
+ </widget>
+ <resources/>
+ <connections/>
+</ui>

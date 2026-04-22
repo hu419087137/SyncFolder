@@ -1,6 +1,9 @@
 #pragma once
 
 #include <QObject>
+#include <QString>
+#include <QStringList>
+#include <QVector>
 
 class QHttpServer;
 class QHttpServerRequest;
@@ -19,6 +22,16 @@ class HttpSyncServer : public QObject
 
 public:
     /**
+     * @brief SharedFolderConfig 描述一个可被 HTTP 服务端对外公开的共享目录。
+     */
+    struct SharedFolderConfig
+    {
+        QString id;
+        QString name;
+        QString rootPath;
+    };
+
+    /**
      * @brief 构造 HTTP 同步服务对象。
      * @param parent QObject 父对象。
      */
@@ -31,13 +44,13 @@ public:
 
     /**
      * @brief 启动 HTTP 同步服务。
-     * @param rootPath 对外提供同步内容的本地根目录。
+     * @param sharedFolderConfigs 对外提供同步内容的共享目录列表。
      * @param listenPort 监听端口。
      * @param accessToken 可选访问令牌；为空时表示不启用鉴权。
      * @param errorMessage 启动失败时返回详细错误。
      * @return `true` 表示启动成功，`false` 表示启动失败。
      */
-    bool startServer(const QString &rootPath,
+    bool startServer(const QVector<SharedFolderConfig> &sharedFolderConfigs,
                      quint16 listenPort,
                      const QString &accessToken,
                      QString *errorMessage);
@@ -80,14 +93,21 @@ signals:
     void sigServerStateChanged(bool isRunning, quint16 listenPort);
 
 private:
+    QHttpServerResponse handleSourcesRequest(const QHttpServerRequest &request);
     QHttpServerResponse handleManifestRequest(const QHttpServerRequest &request);
     void handleFileRequest(const QHttpServerRequest &request, QHttpServerResponder &&responder);
     QHttpServerResponse buildErrorResponse(int statusCode, const QString &errorMessage) const;
     bool isAuthorized(const QHttpServerRequest &request) const;
-    bool buildManifestJson(QByteArray *manifestJson, QString *errorMessage) const;
+    bool resolveSharedFolderFromRequest(const QHttpServerRequest &request,
+                                        const SharedFolderConfig **sharedFolderConfig,
+                                        QString *errorMessage) const;
+    bool buildSourcesJson(QByteArray *sourcesJson, QString *errorMessage) const;
+    bool buildManifestJson(const SharedFolderConfig &sharedFolderConfig,
+                           QByteArray *manifestJson,
+                           QString *errorMessage) const;
 
     QHttpServer *_httpServer;
-    QString _rootPath;
+    QVector<SharedFolderConfig> _sharedFolderConfigs;
     QString _accessToken;
     quint16 _listenPort;
 };

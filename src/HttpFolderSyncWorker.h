@@ -27,12 +27,14 @@ public slots:
     /**
      * @brief 执行一次 HTTP 源目录拉取同步。
      * @param sourceUrl HTTP 服务基地址。
+     * @param remoteSourceId 远端共享目录标识；为空时表示使用默认目录。
      * @param targetPath 本地同步目标目录。
      * @param accessToken 访问令牌，可为空。
      * @param reason 触发本次同步的原因。
      * @param compareMode 文件差异判断模式编号。
      */
     void slotStartSync(const QString &sourceUrl,
+                       const QString &remoteSourceId,
                        const QString &targetPath,
                        const QString &accessToken,
                        const QString &reason,

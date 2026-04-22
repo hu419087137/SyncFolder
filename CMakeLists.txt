@@ -18,6 +18,15 @@ set(projectSources
     src/MainWindow.cpp
     src/MainWindow.h
     src/MainWindow.ui
+    src/LocalSyncTabWidget.cpp
+    src/LocalSyncTabWidget.h
+    src/LocalSyncTabWidget.ui
+    src/HttpServerTabWidget.cpp
+    src/HttpServerTabWidget.h
+    src/HttpServerTabWidget.ui
+    src/HttpClientTabWidget.cpp
+    src/HttpClientTabWidget.h
+    src/HttpClientTabWidget.ui
     src/PairEditDialog.cpp
     src/PairEditDialog.h
     src/PairEditDialog.ui
