@@ -871,7 +871,7 @@ void MainWindow::refreshHttpServerUi()
 {
     const bool isRunning = _httpSyncServer != nullptr && _httpSyncServer->isRunning();
     if (isRunning) {
-        _ui->httpServerEndpointLabel->setText(
+    _ui->httpServerEndpointLabel->setText(
             tr("已启动：%1").arg(_httpSyncServer->endpointUrls().join(tr("； "))));
     } else {
         _ui->httpServerEndpointLabel->setText(tr("未启动。建议其他电脑填写本机显示的 `http://IP:端口/api/v1` 地址。"));

@@ -6,8 +6,8 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>720</width>
-    <height>248</height>
+    <width>760</width>
+    <height>434</height>
    </rect>
   </property>
   <property name="windowTitle">
@@ -96,6 +96,57 @@
       </widget>
      </item>
      <item row="4" column="0" colspan="3">
+      <layout class="QHBoxLayout" name="probeButtonLayout">
+       <item>
+        <widget class="QPushButton" name="testConnectionButton">
+         <property name="text">
+          <string>测试连接</string>
+         </property>
+        </widget>
+       </item>
+       <item>
+        <widget class="QPushButton" name="previewManifestButton">
+         <property name="text">
+          <string>预览清单</string>
+         </property>
+        </widget>
+       </item>
+       <item>
+        <spacer name="probeButtonSpacer">
+         <property name="orientation">
+          <enum>Qt::Horizontal</enum>
+         </property>
+         <property name="sizeHint" stdset="0">
+          <size>
+           <width>40</width>
+           <height>20</height>
+          </size>
+         </property>
+        </spacer>
+       </item>
+      </layout>
+     </item>
+     <item row="5" column="0" colspan="3">
+      <widget class="QLabel" name="probeStatusLabel">
+       <property name="text">
+        <string>HTTP 模式下可先测试连接，再预览远端清单。</string>
+       </property>
+       <property name="wordWrap">
+        <bool>true</bool>
+       </property>
+      </widget>
+     </item>
+     <item row="6" column="0" colspan="3">
+      <widget class="QPlainTextEdit" name="manifestPreviewEdit">
+       <property name="minimumSize">
+        <size>
+         <width>0</width>
+         <height>160</height>
+        </size>
+       </property>
+      </widget>
+     </item>
+     <item row="7" column="0" colspan="3">
       <widget class="QLabel" name="modeHintLabel">
        <property name="text">
         <string>本地模式会把当前电脑上的 A 主目录直接同步到 B 备份目录。</string>

@@ -30,6 +30,7 @@ namespace
 {
 constexpr qint64 kDownloadProgressChunkSize = 4 * 1024 * 1024;
 constexpr int kNetworkTransferTimeoutMs = 60000;
+constexpr int kDownloadRetryCount = 3;
 
 enum class SyncEntryType
 {
@@ -816,6 +817,14 @@ QString buildPlanPreviewSummary(const SyncPlanStats &planStats)
         .arg(planStats.updateFileCount);
 }
 
+QString buildRetryLogText(int attemptIndex, int maxAttemptCount, const SyncOperation &operation)
+{
+    return QObject::tr("下载失败后准备重试：%1，第 %2/%3 次尝试。")
+        .arg(describeOperation(operation))
+        .arg(attemptIndex)
+        .arg(maxAttemptCount);
+}
+
 class HttpRequestExecutor
 {
 public:
@@ -880,7 +889,38 @@ public:
     bool downloadToFile(const SyncOperation &operation,
                         const QString &accessToken,
                         const std::function<void(qint64, const QString &)> &progressCallback,
+                        const std::function<void(const QString &)> &logCallback,
                         QString *errorMessage)
+    {
+        QString lastErrorMessage;
+        for (int attemptIndex = 1; attemptIndex <= kDownloadRetryCount; ++attemptIndex) {
+            if (attemptIndex > 1 && logCallback != nullptr) {
+                logCallback(buildRetryLogText(attemptIndex, kDownloadRetryCount, operation));
+            }
+
+            if (downloadToFileOnce(operation, accessToken, progressCallback, &lastErrorMessage)) {
+                return true;
+            }
+
+            if (_cancelCallback != nullptr && _cancelCallback()) {
+                if (errorMessage != nullptr) {
+                    *errorMessage = QObject::tr("用户取消同步。");
+                }
+                return false;
+            }
+        }
+
+        if (errorMessage != nullptr) {
+            *errorMessage = lastErrorMessage;
+        }
+        return false;
+    }
+
+private:
+    bool downloadToFileOnce(const SyncOperation &operation,
+                            const QString &accessToken,
+                            const std::function<void(qint64, const QString &)> &progressCallback,
+                            QString *errorMessage)
     {
         const QFileInfo targetInfo(operation.targetPath);
         if (!ensureDirectoryExists(targetInfo.dir().absolutePath(), errorMessage)) {
@@ -1005,7 +1045,6 @@ public:
         return true;
     }
 
-private:
     QNetworkReply *createReply(const QUrl &url, const QString &accessToken) const
     {
         QNetworkRequest request(url);
@@ -1240,6 +1279,7 @@ void HttpFolderSyncWorker::slotStartSync(const QString &sourceUrl,
                                          totalProgressUnits,
                                          progressItem);
                 },
+                [this](const QString &message) { emit sigLogMessage(message); },
                 &executeErrorMessage);
         } else {
             executeSuccess = executeLocalOperation(operation, &executeErrorMessage);

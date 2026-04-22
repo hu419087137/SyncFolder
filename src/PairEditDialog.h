@@ -1,8 +1,12 @@
 #pragma once
 
 #include <QDialog>
+#include <QPointer>
 
 #include "SyncTypes.h"
+
+class QNetworkAccessManager;
+class QNetworkReply;
 
 namespace Ui
 {
@@ -63,7 +67,7 @@ public:
 
     /**
      * @brief 获取同步源位置。
-     * @return 本地模式下为规范化目录路径，HTTP 模式下为规范化服务地址。
+     * @return 本地模式下为规范化目录路径，HTTP 模式下为用户输入的服务地址。
      */
     QString sourceLocation() const;
 
@@ -83,9 +87,30 @@ private slots:
     void slotSourceTypeChanged(int index);
     void slotBrowseSourceFolder();
     void slotBrowseTargetFolder();
+    void slotTestSourceConnection();
+    void slotPreviewSourceManifest();
+    void slotProbeReplyFinished();
+    void slotProbeInputChanged();
 
 private:
+    enum ProbeActionKind
+    {
+        E_NoProbeAction = 0,
+        E_TestConnectionAction = 1,
+        E_PreviewManifestAction = 2
+    };
+
     void applySourceTypeUi(PairSourceType sourceType);
+    void updateProbeUiState(bool isBusy);
+    void clearProbeResult(bool preserveStatusText = false);
+    bool startProbeRequest(ProbeActionKind probeActionKind);
+    bool buildManifestPreviewText(const QByteArray &manifestJson,
+                                  QString *summaryText,
+                                  QString *previewText,
+                                  QString *errorMessage) const;
 
     Ui::PairEditDialog *_ui;
+    QNetworkAccessManager *_networkAccessManager;
+    QPointer<QNetworkReply> _activeProbeReply;
+    int _activeProbeActionKind;
 };
