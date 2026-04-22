@@ -1,4 +1,5 @@
 .qtcreator/
+bin_Qt*/
 build/
 build-*/
 buildlog.txt

@@ -172,15 +172,16 @@ Qt::CaseSensitivity pathCaseSensitivity()
 
 bool isSameOrChildPath(const QString &rootPath, const QString &candidatePath)
 {
-    const QString normalizedRootPath = QDir::cleanPath(rootPath);
-    const QString normalizedCandidatePath = QDir::cleanPath(candidatePath);
+    const QString normalizedRootPath = QDir::fromNativeSeparators(QDir::cleanPath(rootPath));
+    const QString normalizedCandidatePath =
+        QDir::fromNativeSeparators(QDir::cleanPath(candidatePath));
     const Qt::CaseSensitivity caseSensitivity = pathCaseSensitivity();
 
     if (normalizedRootPath.compare(normalizedCandidatePath, caseSensitivity) == 0) {
         return true;
     }
 
-    const QString rootPrefix = normalizedRootPath + QDir::separator();
+    const QString rootPrefix = normalizedRootPath + QLatin1Char('/');
     return normalizedCandidatePath.startsWith(rootPrefix, caseSensitivity);
 }
 

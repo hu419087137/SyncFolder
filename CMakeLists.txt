@@ -13,6 +13,38 @@ set(CMAKE_AUTORCC OFF)
 find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Widgets Network HttpServer)
 find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets Network HttpServer)
 
+# 指定输出目录 保留原来的目录结构.
+if (CMAKE_BUILD_TYPE STREQUAL "Debug")
+
+    if (MSVC)
+        # 设置可执行文件的输出目录.
+        set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin_Qt${QT_VERSION_MAJOR}/debug/msvc_x64)
+    elseif (APPLE)
+        set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin_Qt${QT_VERSION_MAJOR}/debug/clang_x64)
+        # 设置共享库文件的输出目录.
+        set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin_Qt${QT_VERSION_MAJOR}/debug/clang_x64)
+    else()
+        set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin_Qt${QT_VERSION_MAJOR}/debug/gcc_x64)
+        # 设置共享库文件的输出目录.
+        set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin_Qt${QT_VERSION_MAJOR}/debug/gcc_x64)
+    endif ()
+else ()
+
+    if (MSVC)
+        set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin_Qt${QT_VERSION_MAJOR}/release/msvc_x64)
+    elseif (APPLE)
+        set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin_Qt${QT_VERSION_MAJOR}/release/clang_x64)
+        # 设置共享库文件的输出目录.
+        set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin_Qt${QT_VERSION_MAJOR}/release/clang_x64)
+    else()
+        set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin_Qt${QT_VERSION_MAJOR}/release/gcc_x64)
+        # 设置共享库文件的输出目录.
+        set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin_Qt${QT_VERSION_MAJOR}/release/gcc_x64)
+    endif ()
+endif ()
+
+message(STATUS "CMAKE_RUNTIME_OUTPUT_DIRECTORY:${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
+
 set(projectSources
     src/main.cpp
     src/MainWindow.cpp
