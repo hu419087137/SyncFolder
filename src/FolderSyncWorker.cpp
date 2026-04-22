@@ -3,6 +3,7 @@
 #include <QDir>
 #include <QDirIterator>
 #include <QDateTime>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileDevice>
 #include <QFileInfo>
@@ -72,6 +73,15 @@ struct PlanStageProgress
     qint64 current = 0;
     qint64 total = 0;
     QString text;
+};
+
+struct ExecutionStats
+{
+    int removeFileCount = 0;
+    int removeDirectoryCount = 0;
+    int createDirectoryCount = 0;
+    int copyFileCount = 0;
+    qint64 completedProgressUnits = 0;
 };
 
 using CancelCallback = std::function<bool()>;
@@ -870,6 +880,30 @@ bool executeOperation(const SyncOperation &operation,
     return false;
 }
 
+void recordExecutedOperation(const SyncOperation &operation, ExecutionStats *executionStats)
+{
+    if (executionStats == nullptr) {
+        return;
+    }
+
+    switch (operation.type) {
+    case SyncOperationType::E_RemoveFile:
+        ++executionStats->removeFileCount;
+        break;
+    case SyncOperationType::E_RemoveDirectory:
+        ++executionStats->removeDirectoryCount;
+        break;
+    case SyncOperationType::E_CreateDirectory:
+        ++executionStats->createDirectoryCount;
+        break;
+    case SyncOperationType::E_CopyFile:
+        ++executionStats->copyFileCount;
+        break;
+    }
+
+    executionStats->completedProgressUnits += qMax<qint64>(1, operation.progressUnits);
+}
+
 qint64 calculateTotalProgressUnits(const QVector<SyncOperation> &operations)
 {
     qint64 totalProgressUnits = 0;
@@ -912,6 +946,42 @@ QString buildSummary(const QVector<SyncOperation> &operations)
         .arg(removeDirectoryCount);
 }
 
+QString formatElapsedTime(qint64 elapsedMs)
+{
+    if (elapsedMs < 1000) {
+        return QObject::tr("%1 ms").arg(elapsedMs);
+    }
+
+    const double elapsedSeconds = static_cast<double>(elapsedMs) / 1000.0;
+    if (elapsedSeconds < 60.0) {
+        return QObject::tr("%1 秒").arg(elapsedSeconds, 0, 'f', 1);
+    }
+
+    const qint64 elapsedMinutes = elapsedMs / 60000;
+    const qint64 remainingSeconds = (elapsedMs % 60000) / 1000;
+    return QObject::tr("%1 分 %2 秒").arg(elapsedMinutes).arg(remainingSeconds);
+}
+
+QString buildExecutionSummary(const ExecutionStats &executionStats,
+                              int plannedOperationCount,
+                              qint64 totalProgressUnits,
+                              qint64 elapsedMs,
+                              const QString &reason)
+{
+    return QObject::tr("同步结果摘要：处理步骤 %1/%2，创建目录 %3，复制文件 %4，删除文件 %5，删除目录 %6，进度单位 %7/%8，耗时 %9，reason=%10。")
+        .arg(executionStats.createDirectoryCount + executionStats.copyFileCount
+             + executionStats.removeFileCount + executionStats.removeDirectoryCount)
+        .arg(plannedOperationCount)
+        .arg(executionStats.createDirectoryCount)
+        .arg(executionStats.copyFileCount)
+        .arg(executionStats.removeFileCount)
+        .arg(executionStats.removeDirectoryCount)
+        .arg(executionStats.completedProgressUnits)
+        .arg(totalProgressUnits)
+        .arg(formatElapsedTime(elapsedMs))
+        .arg(reason);
+}
+
 QString buildPlanPreviewSummary(const SyncPlanStats &planStats)
 {
     return QObject::tr("备份前检查：待删除文件 %1，待新增文件 %2，待同步文件 %3。")
@@ -936,6 +1006,8 @@ void FolderSyncWorker::slotStartSync(const QString &sourcePath,
                                      const QString &reason,
                                      CompareMode compareMode)
 {
+    QElapsedTimer syncTimer;
+    syncTimer.start();
     _isCancelRequested.storeRelease(0);
     auto isCancelRequested = [this]() {
         return _isCancelRequested.loadAcquire() != 0 || QThread::currentThread()->isInterruptionRequested();
@@ -1015,6 +1087,11 @@ void FolderSyncWorker::slotStartSync(const QString &sourcePath,
                         reason);
     if (operations.isEmpty()) {
         const QString summary = QObject::tr("A 与 B 已一致，无需同步。");
+        emit sigLogMessage(buildExecutionSummary(ExecutionStats(),
+                                                 operations.size(),
+                                                 totalProgressUnits,
+                                                 syncTimer.elapsed(),
+                                                 reason));
         emit sigLogMessage(summary);
         emit sigSyncFinished(true, summary);
         return;
@@ -1025,9 +1102,15 @@ void FolderSyncWorker::slotStartSync(const QString &sourcePath,
                            .arg(reason));
 
     qint64 completedProgressUnits = 0;
+    ExecutionStats executionStats;
     for (int index = 0; index < operations.size(); ++index) {
         if (isCancelRequested()) {
             const QString summary = QObject::tr("同步已取消，reason=%1").arg(reason);
+            emit sigLogMessage(buildExecutionSummary(executionStats,
+                                                     operations.size(),
+                                                     totalProgressUnits,
+                                                     syncTimer.elapsed(),
+                                                     reason));
             emit sigLogMessage(summary);
             emit sigSyncFinished(false, summary);
             return;
@@ -1050,16 +1133,27 @@ void FolderSyncWorker::slotStartSync(const QString &sourcePath,
             const QString summary =
                 QObject::tr("同步失败，reason=%1，step=%2，error=%3")
                     .arg(reason, currentItem, executeErrorMessage);
+            emit sigLogMessage(buildExecutionSummary(executionStats,
+                                                     operations.size(),
+                                                     totalProgressUnits,
+                                                     syncTimer.elapsed(),
+                                                     reason));
             emit sigLogMessage(summary);
             emit sigSyncFinished(false, summary);
             return;
         }
 
         completedProgressUnits += qMax<qint64>(1, operation.progressUnits);
+        recordExecutedOperation(operation, &executionStats);
         emit sigSyncProgress(completedProgressUnits, totalProgressUnits, currentItem);
     }
 
     const QString summary = buildSummary(operations);
+    emit sigLogMessage(buildExecutionSummary(executionStats,
+                                             operations.size(),
+                                             totalProgressUnits,
+                                             syncTimer.elapsed(),
+                                             reason));
     emit sigLogMessage(summary);
     emit sigSyncFinished(true, summary);
 }
