@@ -10,6 +10,7 @@
 #include <QFile>
 #include <QFileDevice>
 #include <QFileInfo>
+#include <QCryptographicHash>
 #include <QHash>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -17,7 +18,6 @@
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
-#include <QSaveFile>
 #include <QSet>
 #include <QThread>
 #include <QUrl>
@@ -31,6 +31,8 @@ namespace
 constexpr qint64 kDownloadProgressChunkSize = 4 * 1024 * 1024;
 constexpr int kNetworkTransferTimeoutMs = 60000;
 constexpr int kDownloadRetryCount = 3;
+constexpr int kResumeMetadataVersion = 1;
+const QString kResumeCacheDirectoryName = QStringLiteral(".syncfolder_resume");
 
 enum class SyncEntryType
 {
@@ -62,6 +64,7 @@ struct SyncOperation
     QString relativePath;
     QUrl sourceUrl;
     qint64 progressUnits = 1;
+    qint64 fileSize = 0;
     qint64 modifiedTimeMs = 0;
 };
 
@@ -182,6 +185,41 @@ QString buildManifestProgressText(qint64 receivedBytes, qint64 totalBytes)
         qRound(static_cast<double>(receivedBytes) * 100.0 / static_cast<double>(totalBytes)),
         100);
     return QObject::tr("正在获取远端清单（%1%）").arg(percent);
+}
+
+QString formatByteSize(qint64 bytes)
+{
+    if (bytes < 1024) {
+        return QObject::tr("%1 B").arg(bytes);
+    }
+
+    const double kiloBytes = static_cast<double>(bytes) / 1024.0;
+    if (kiloBytes < 1024.0) {
+        return QObject::tr("%1 KB").arg(kiloBytes, 0, 'f', 1);
+    }
+
+    const double megaBytes = kiloBytes / 1024.0;
+    if (megaBytes < 1024.0) {
+        return QObject::tr("%1 MB").arg(megaBytes, 0, 'f', 1);
+    }
+
+    const double gigaBytes = megaBytes / 1024.0;
+    return QObject::tr("%1 GB").arg(gigaBytes, 0, 'f', 2);
+}
+
+QString buildDownloadProgressText(const SyncOperation &operation, qint64 completedBytes)
+{
+    const qint64 totalBytes = qMax<qint64>(1, operation.fileSize);
+    const qint64 boundedCompletedBytes = qBound<qint64>(0, completedBytes, totalBytes);
+    const int percent = qBound<int>(
+        0,
+        qRound(static_cast<double>(boundedCompletedBytes) * 100.0 / static_cast<double>(totalBytes)),
+        100);
+    return QObject::tr("下载文件：%1（%2/%3，%4%）")
+        .arg(displayRelativePath(operation.relativePath))
+        .arg(formatByteSize(boundedCompletedBytes))
+        .arg(formatByteSize(totalBytes))
+        .arg(percent);
 }
 
 QString describeOperation(const SyncOperation &operation)
@@ -385,6 +423,220 @@ bool writeAll(QFileDevice *targetFile, const QByteArray &buffer, const QString &
     return true;
 }
 
+bool isResumeCacheRelativePath(const QString &relativePath)
+{
+    if (relativePath.isEmpty()) {
+        return false;
+    }
+
+    const QStringList pathSegments =
+        QDir::fromNativeSeparators(relativePath).split(QLatin1Char('/'), Qt::SkipEmptyParts);
+    return pathSegments.contains(kResumeCacheDirectoryName);
+}
+
+QString buildResumeCacheRoot(const QString &targetDirectoryPath)
+{
+    return QDir(targetDirectoryPath).absoluteFilePath(kResumeCacheDirectoryName);
+}
+
+QString buildResumeCacheKey(const SyncOperation &operation)
+{
+    const QByteArray cacheKeySource =
+        operation.targetPath.toUtf8() + QByteArrayLiteral("|") + operation.relativePath.toUtf8();
+    return QString::fromLatin1(
+        QCryptographicHash::hash(cacheKeySource, QCryptographicHash::Sha1).toHex());
+}
+
+QString buildResumePartFilePath(const SyncOperation &operation)
+{
+    return QDir(buildResumeCacheRoot(QFileInfo(operation.targetPath).dir().absolutePath()))
+        .absoluteFilePath(buildResumeCacheKey(operation) + QStringLiteral(".part"));
+}
+
+QString buildResumeMetaFilePath(const SyncOperation &operation)
+{
+    return QDir(buildResumeCacheRoot(QFileInfo(operation.targetPath).dir().absolutePath()))
+        .absoluteFilePath(buildResumeCacheKey(operation) + QStringLiteral(".json"));
+}
+
+QString buildResumeBackupFilePath(const SyncOperation &operation)
+{
+    return QDir(buildResumeCacheRoot(QFileInfo(operation.targetPath).dir().absolutePath()))
+        .absoluteFilePath(buildResumeCacheKey(operation) + QStringLiteral(".bak"));
+}
+
+QJsonObject buildResumeMetadata(const SyncOperation &operation)
+{
+    return QJsonObject{{QStringLiteral("version"), kResumeMetadataVersion},
+                       {QStringLiteral("targetPath"), operation.targetPath},
+                       {QStringLiteral("relativePath"), operation.relativePath},
+                       {QStringLiteral("fileSize"), static_cast<double>(operation.fileSize)},
+                       {QStringLiteral("modifiedTimeMs"), static_cast<double>(operation.modifiedTimeMs)},
+                       {QStringLiteral("sourceUrl"),
+                        operation.sourceUrl.toString(QUrl::FullyEncoded)}};
+}
+
+bool writeResumeMetadata(const SyncOperation &operation, QString *errorMessage)
+{
+    const QString resumeMetaFilePath = buildResumeMetaFilePath(operation);
+    const QFileInfo metaFileInfo(resumeMetaFilePath);
+    if (!ensureDirectoryExists(metaFileInfo.dir().absolutePath(), errorMessage)) {
+        return false;
+    }
+
+    QFile metaFile(resumeMetaFilePath);
+    if (!metaFile.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        if (errorMessage != nullptr) {
+            *errorMessage = QObject::tr("写入续传元数据失败，path=%1，error=%2")
+                                .arg(resumeMetaFilePath, metaFile.errorString());
+        }
+        return false;
+    }
+
+    const QByteArray metadataJson = QJsonDocument(buildResumeMetadata(operation))
+                                        .toJson(QJsonDocument::Compact);
+    if (metaFile.write(metadataJson) != metadataJson.size()) {
+        if (errorMessage != nullptr) {
+            *errorMessage = QObject::tr("写入续传元数据失败，path=%1，error=%2")
+                                .arg(resumeMetaFilePath, metaFile.errorString());
+        }
+        return false;
+    }
+    return true;
+}
+
+bool removeResumeArtifacts(const SyncOperation &operation)
+{
+    bool ok = true;
+    const QString resumePartFilePath = buildResumePartFilePath(operation);
+    const QString resumeMetaFilePath = buildResumeMetaFilePath(operation);
+    if (QFileInfo::exists(resumePartFilePath) && !QFile::remove(resumePartFilePath)) {
+        qWarning() << "Failed to remove resume part file. path=" << resumePartFilePath;
+        ok = false;
+    }
+    if (QFileInfo::exists(resumeMetaFilePath) && !QFile::remove(resumeMetaFilePath)) {
+        qWarning() << "Failed to remove resume metadata file. path=" << resumeMetaFilePath;
+        ok = false;
+    }
+    return ok;
+}
+
+bool isResumeMetadataMatched(const QJsonObject &metadataObject, const SyncOperation &operation)
+{
+    return metadataObject.value(QStringLiteral("version")).toInt() == kResumeMetadataVersion
+        && metadataObject.value(QStringLiteral("targetPath")).toString() == operation.targetPath
+        && metadataObject.value(QStringLiteral("relativePath")).toString() == operation.relativePath
+        && static_cast<qint64>(metadataObject.value(QStringLiteral("fileSize")).toDouble(-1))
+            == operation.fileSize
+        && static_cast<qint64>(metadataObject.value(QStringLiteral("modifiedTimeMs")).toDouble(-1))
+            == operation.modifiedTimeMs
+        && metadataObject.value(QStringLiteral("sourceUrl")).toString()
+            == operation.sourceUrl.toString(QUrl::FullyEncoded);
+}
+
+bool tryLoadResumeBytes(const SyncOperation &operation,
+                        qint64 *resumeBytes,
+                        QString *errorMessage)
+{
+    if (resumeBytes == nullptr) {
+        if (errorMessage != nullptr) {
+            *errorMessage = QObject::tr("续传进度输出参数不能为空。");
+        }
+        return false;
+    }
+
+    *resumeBytes = 0;
+    const QString resumePartFilePath = buildResumePartFilePath(operation);
+    const QString resumeMetaFilePath = buildResumeMetaFilePath(operation);
+    const QFileInfo partFileInfo(resumePartFilePath);
+    const QFileInfo metaFileInfo(resumeMetaFilePath);
+    if (!partFileInfo.exists() || !metaFileInfo.exists()) {
+        return true;
+    }
+
+    QFile metaFile(resumeMetaFilePath);
+    if (!metaFile.open(QIODevice::ReadOnly)) {
+        removeResumeArtifacts(operation);
+        return true;
+    }
+
+    QJsonParseError parseError;
+    const QJsonDocument metadataDocument = QJsonDocument::fromJson(metaFile.readAll(), &parseError);
+    if (parseError.error != QJsonParseError::NoError || !metadataDocument.isObject()
+        || !isResumeMetadataMatched(metadataDocument.object(), operation)) {
+        removeResumeArtifacts(operation);
+        return true;
+    }
+
+    const qint64 partFileSize = partFileInfo.size();
+    if (operation.fileSize <= 0 || partFileSize <= 0 || partFileSize >= operation.fileSize) {
+        removeResumeArtifacts(operation);
+        return true;
+    }
+
+    *resumeBytes = partFileSize;
+    return true;
+}
+
+bool ensureResumeMetadata(const SyncOperation &operation, QString *errorMessage)
+{
+    if (!writeResumeMetadata(operation, errorMessage)) {
+        return false;
+    }
+    return true;
+}
+
+bool moveDownloadedFileToTarget(const QString &downloadedFilePath,
+                                const SyncOperation &operation,
+                                QString *errorMessage)
+{
+    const QString backupFilePath = buildResumeBackupFilePath(operation);
+    if (!ensureDirectoryExists(QFileInfo(backupFilePath).dir().absolutePath(), errorMessage)) {
+        return false;
+    }
+
+    if (QFileInfo::exists(backupFilePath) && !removeFileAtPath(backupFilePath, errorMessage)) {
+        return false;
+    }
+
+    bool targetBackedUp = false;
+    if (QFileInfo::exists(operation.targetPath)) {
+        QFile targetFile(operation.targetPath);
+        if (!targetFile.rename(backupFilePath)) {
+            if (errorMessage != nullptr) {
+                *errorMessage = QObject::tr("备份旧目标文件失败，source=%1，backup=%2，error=%3")
+                                    .arg(operation.targetPath, backupFilePath, targetFile.errorString());
+            }
+            return false;
+        }
+        targetBackedUp = true;
+    }
+
+    QFile downloadedFile(downloadedFilePath);
+    if (!downloadedFile.rename(operation.targetPath)) {
+        if (targetBackedUp) {
+            QFile backupFile(backupFilePath);
+            if (!backupFile.rename(operation.targetPath)) {
+                qWarning() << "Failed to restore backup file after replace failure. backup="
+                           << backupFilePath
+                           << "target=" << operation.targetPath
+                           << "error=" << backupFile.errorString();
+            }
+        }
+
+        if (errorMessage != nullptr) {
+            *errorMessage = QObject::tr("替换目标文件失败，source=%1，target=%2，error=%3")
+                                .arg(downloadedFilePath, operation.targetPath, downloadedFile.errorString());
+        }
+        return false;
+    }
+
+    if (targetBackedUp && QFileInfo::exists(backupFilePath) && !QFile::remove(backupFilePath)) {
+        qWarning() << "Failed to remove backup file after replace. path=" << backupFilePath;
+    }
+    return true;
+}
+
 bool isUnderRemovedDirectoryRoot(const QString &relativePath, const QStringList &removedDirectoryRoots)
 {
     for (const QString &removedRoot : removedDirectoryRoots) {
@@ -548,6 +800,9 @@ bool buildSyncPlan(const QVector<ManifestEntry> &manifestEntries,
         }
 
         const QString relativePath = normalizeRelativePath(targetRoot, targetInfo.absoluteFilePath());
+        if (isResumeCacheRelativePath(relativePath)) {
+            continue;
+        }
         if (isUnderRemovedDirectoryRoot(relativePath, removedDirectoryRoots)) {
             continue;
         }
@@ -657,6 +912,7 @@ bool buildSyncPlan(const QVector<ManifestEntry> &manifestEntries,
                                        manifestEntry.relativePath,
                                        buildFileUrl(normalizedSourceUrl, manifestEntry.relativePath),
                                        calculateDownloadProgressUnits(manifestEntry.fileSize),
+                                       manifestEntry.fileSize,
                                        manifestEntry.modifiedTimeMs},
                                       &operationKeys,
                                       &downloadFileOperations);
@@ -825,6 +1081,13 @@ QString buildRetryLogText(int attemptIndex, int maxAttemptCount, const SyncOpera
         .arg(maxAttemptCount);
 }
 
+struct DownloadAttemptContext
+{
+    QString resumePartFilePath;
+    qint64 resumeBytes = 0;
+    bool isResumeRequested = false;
+};
+
 class HttpRequestExecutor
 {
 public:
@@ -898,7 +1161,11 @@ public:
                 logCallback(buildRetryLogText(attemptIndex, kDownloadRetryCount, operation));
             }
 
-            if (downloadToFileOnce(operation, accessToken, progressCallback, &lastErrorMessage)) {
+            if (downloadToFileOnce(operation,
+                                   accessToken,
+                                   progressCallback,
+                                   logCallback,
+                                   &lastErrorMessage)) {
                 return true;
             }
 
@@ -917,9 +1184,230 @@ public:
     }
 
 private:
+    bool prepareDownloadAttempt(const SyncOperation &operation,
+                                DownloadAttemptContext *attemptContext,
+                                QString *errorMessage)
+    {
+        if (attemptContext == nullptr) {
+            if (errorMessage != nullptr) {
+                *errorMessage = QObject::tr("下载尝试上下文不能为空。");
+            }
+            return false;
+        }
+
+        attemptContext->resumePartFilePath = buildResumePartFilePath(operation);
+        const QFileInfo resumePartFileInfo(attemptContext->resumePartFilePath);
+        if (!ensureDirectoryExists(resumePartFileInfo.dir().absolutePath(), errorMessage)) {
+            return false;
+        }
+
+        qint64 resumeBytes = 0;
+        if (!tryLoadResumeBytes(operation, &resumeBytes, errorMessage)) {
+            return false;
+        }
+
+        attemptContext->resumeBytes = resumeBytes;
+        attemptContext->isResumeRequested = resumeBytes > 0;
+        if (!ensureResumeMetadata(operation, errorMessage)) {
+            return false;
+        }
+        return true;
+    }
+
+    QNetworkReply *createDownloadReply(const SyncOperation &operation,
+                                       const QString &accessToken,
+                                       const DownloadAttemptContext &attemptContext) const
+    {
+        QNetworkRequest request(operation.sourceUrl);
+        request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
+                             QNetworkRequest::NoLessSafeRedirectPolicy);
+        request.setTransferTimeout(kNetworkTransferTimeoutMs);
+        request.setRawHeader(QByteArrayLiteral("Accept"),
+                             QByteArrayLiteral("application/json, application/octet-stream, */*"));
+        if (!accessToken.trimmed().isEmpty()) {
+            request.setRawHeader(QByteArrayLiteral("Authorization"),
+                                 QStringLiteral("Bearer %1").arg(accessToken.trimmed()).toUtf8());
+        }
+        if (attemptContext.isResumeRequested) {
+            request.setRawHeader(QByteArrayLiteral("Range"),
+                                 QByteArrayLiteral("bytes=")
+                                     + QByteArray::number(attemptContext.resumeBytes)
+                                     + QByteArrayLiteral("-"));
+        }
+        return _networkAccessManager->get(request);
+    }
+
+    bool openDownloadFile(const SyncOperation &operation,
+                          const DownloadAttemptContext &attemptContext,
+                          QFile *downloadFile,
+                          QString *errorMessage) const
+    {
+        if (downloadFile == nullptr) {
+            if (errorMessage != nullptr) {
+                *errorMessage = QObject::tr("下载文件对象不能为空。");
+            }
+            return false;
+        }
+
+        const QIODeviceBase::OpenMode openMode = attemptContext.isResumeRequested
+            ? (QIODevice::WriteOnly | QIODevice::Append)
+            : (QIODevice::WriteOnly | QIODevice::Truncate);
+        downloadFile->setFileName(attemptContext.resumePartFilePath);
+        if (!downloadFile->open(openMode)) {
+            if (errorMessage != nullptr) {
+                *errorMessage = QObject::tr("打开续传文件失败，path=%1，error=%2")
+                                    .arg(attemptContext.resumePartFilePath, downloadFile->errorString());
+            }
+            return false;
+        }
+
+        if (!attemptContext.isResumeRequested) {
+            return true;
+        }
+
+        if (!downloadFile->seek(attemptContext.resumeBytes)) {
+            if (errorMessage != nullptr) {
+                *errorMessage = QObject::tr("定位续传文件失败，path=%1，offset=%2，error=%3")
+                                    .arg(attemptContext.resumePartFilePath)
+                                    .arg(attemptContext.resumeBytes)
+                                    .arg(downloadFile->errorString());
+            }
+            return false;
+        }
+
+        return true;
+    }
+
+    bool restartDownloadFromZero(const SyncOperation &operation,
+                                 DownloadAttemptContext *attemptContext,
+                                 QFile *downloadFile,
+                                 QString *errorMessage) const
+    {
+        if (attemptContext == nullptr || downloadFile == nullptr) {
+            if (errorMessage != nullptr) {
+                *errorMessage = QObject::tr("重置下载上下文失败，参数不能为空。");
+            }
+            return false;
+        }
+
+        downloadFile->close();
+        if (QFileInfo::exists(attemptContext->resumePartFilePath)
+            && !QFile::remove(attemptContext->resumePartFilePath)) {
+            if (errorMessage != nullptr) {
+                *errorMessage = QObject::tr("删除旧续传文件失败，path=%1")
+                                    .arg(attemptContext->resumePartFilePath);
+            }
+            return false;
+        }
+
+        attemptContext->resumeBytes = 0;
+        attemptContext->isResumeRequested = false;
+        return openDownloadFile(operation, *attemptContext, downloadFile, errorMessage);
+    }
+
+    bool validateDownloadReply(QNetworkReply *reply,
+                               const SyncOperation &operation,
+                               const DownloadAttemptContext &attemptContext,
+                               QString *errorMessage) const
+    {
+        if (reply == nullptr) {
+            if (errorMessage != nullptr) {
+                *errorMessage = QObject::tr("下载响应对象为空。");
+            }
+            return false;
+        }
+
+        const int statusCode = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        if (statusCode <= 0) {
+            if (errorMessage != nullptr) {
+                *errorMessage = QObject::tr("下载响应尚未返回有效状态码，path=%1")
+                                    .arg(operation.relativePath);
+            }
+            return false;
+        }
+
+        if (!attemptContext.isResumeRequested) {
+            if (statusCode != 200) {
+                if (errorMessage != nullptr) {
+                    *errorMessage = QObject::tr("远端下载状态异常，path=%1，httpStatus=%2")
+                                        .arg(operation.relativePath)
+                                        .arg(statusCode);
+                }
+                return false;
+            }
+            return true;
+        }
+
+        if (statusCode == 206) {
+            const QByteArray contentRange = reply->rawHeader(QByteArrayLiteral("Content-Range")).trimmed();
+            const QByteArray expectedPrefix =
+                QByteArrayLiteral("bytes ") + QByteArray::number(attemptContext.resumeBytes) + QByteArrayLiteral("-");
+            if (!contentRange.startsWith(expectedPrefix)) {
+                if (errorMessage != nullptr) {
+                    *errorMessage = QObject::tr("远端续传响应范围异常，path=%1，range=%2")
+                                        .arg(operation.relativePath, QString::fromUtf8(contentRange));
+                }
+                return false;
+            }
+            return true;
+        }
+
+        if (statusCode == 200) {
+            return true;
+        }
+
+        if (errorMessage != nullptr) {
+            *errorMessage = QObject::tr("远端续传状态异常，path=%1，httpStatus=%2")
+                                .arg(operation.relativePath)
+                                .arg(statusCode);
+        }
+        return false;
+    }
+
+    bool finalizeDownloadedFile(const SyncOperation &operation,
+                                const QString &downloadedFilePath,
+                                QString *errorMessage) const
+    {
+        QFile downloadedFile(downloadedFilePath);
+        if (!downloadedFile.open(QIODevice::ReadWrite)) {
+            if (errorMessage != nullptr) {
+                *errorMessage = QObject::tr("打开下载结果失败，path=%1，error=%2")
+                                    .arg(downloadedFilePath, downloadedFile.errorString());
+            }
+            return false;
+        }
+
+        const qint64 actualFileSize = downloadedFile.size();
+        if (actualFileSize != operation.fileSize) {
+            if (errorMessage != nullptr) {
+                *errorMessage = QObject::tr("下载文件大小不匹配，path=%1，expected=%2，actual=%3")
+                                    .arg(operation.relativePath)
+                                    .arg(operation.fileSize)
+                                    .arg(actualFileSize);
+            }
+            return false;
+        }
+
+        if (!downloadedFile.setFileTime(QDateTime::fromMSecsSinceEpoch(operation.modifiedTimeMs),
+                                        QFileDevice::FileModificationTime)) {
+            qWarning() << "Failed to update downloaded file timestamp. path=" << downloadedFilePath
+                       << "mtimeMs=" << operation.modifiedTimeMs
+                       << "error=" << downloadedFile.errorString();
+        }
+        downloadedFile.close();
+
+        if (!moveDownloadedFileToTarget(downloadedFilePath, operation, errorMessage)) {
+            return false;
+        }
+
+        removeResumeArtifacts(operation);
+        return true;
+    }
+
     bool downloadToFileOnce(const SyncOperation &operation,
                             const QString &accessToken,
                             const std::function<void(qint64, const QString &)> &progressCallback,
+                            const std::function<void(const QString &)> &logCallback,
                             QString *errorMessage)
     {
         const QFileInfo targetInfo(operation.targetPath);
@@ -927,25 +1415,29 @@ private:
             return false;
         }
 
-        if (QFileInfo::exists(operation.targetPath)
-            && !removeFileAtPath(operation.targetPath, errorMessage)) {
+        DownloadAttemptContext attemptContext;
+        if (!prepareDownloadAttempt(operation, &attemptContext, errorMessage)) {
             return false;
         }
 
-        QSaveFile targetFile(operation.targetPath);
-        if (!targetFile.open(QIODevice::WriteOnly)) {
-            if (errorMessage != nullptr) {
-                *errorMessage = QObject::tr("打开本地文件失败，target=%1，error=%2")
-                                    .arg(operation.targetPath, targetFile.errorString());
-            }
+        if (attemptContext.isResumeRequested && logCallback != nullptr) {
+            logCallback(QObject::tr("检测到未完成下载，准备断点续传：%1，已完成 %2/%3。")
+                            .arg(displayRelativePath(operation.relativePath))
+                            .arg(formatByteSize(attemptContext.resumeBytes))
+                            .arg(formatByteSize(operation.fileSize)));
+        }
+
+        QFile downloadFile;
+        if (!openDownloadFile(operation, attemptContext, &downloadFile, errorMessage)) {
             return false;
         }
 
-        QNetworkReply *reply = createReply(operation.sourceUrl, accessToken);
+        QNetworkReply *reply = createDownloadReply(operation, accessToken, attemptContext);
         if (reply == nullptr) {
             if (errorMessage != nullptr) {
                 *errorMessage = QObject::tr("创建下载请求失败，url=%1").arg(operation.sourceUrl.toString());
             }
+            downloadFile.close();
             return false;
         }
 
@@ -954,8 +1446,13 @@ private:
         QEventLoop eventLoop;
         QByteArray errorBody;
         QString writeErrorMessage;
-        qint64 downloadedBytes = 0;
-        qint64 lastReportedUnits = 0;
+        bool responseInitialized = false;
+        qint64 completedBytes = attemptContext.resumeBytes;
+        qint64 lastReportedUnits =
+            qMin(operation.progressUnits, calculateDownloadProgressUnits(completedBytes));
+        if (progressCallback != nullptr && completedBytes > 0) {
+            progressCallback(lastReportedUnits, buildDownloadProgressText(operation, completedBytes));
+        }
 
         QObject::connect(reply, &QIODevice::readyRead, &eventLoop, [&]() {
             const int statusCode = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
@@ -964,21 +1461,42 @@ private:
                 return;
             }
 
+            if (!responseInitialized) {
+                responseInitialized = true;
+                if (!validateDownloadReply(reply, operation, attemptContext, &writeErrorMessage)) {
+                    reply->abort();
+                    return;
+                }
+
+                if (attemptContext.isResumeRequested && statusCode == 200) {
+                    if (logCallback != nullptr) {
+                        logCallback(QObject::tr("远端未返回分段内容，改为整包重下：%1")
+                                        .arg(displayRelativePath(operation.relativePath)));
+                    }
+                    if (!restartDownloadFromZero(operation, &attemptContext, &downloadFile, &writeErrorMessage)) {
+                        reply->abort();
+                        return;
+                    }
+                    completedBytes = 0;
+                    lastReportedUnits = 0;
+                }
+            }
+
             const QByteArray buffer = reply->readAll();
             if (buffer.isEmpty()) {
                 return;
             }
 
-            if (!writeAll(&targetFile, buffer, operation.targetPath, &writeErrorMessage)) {
+            if (!writeAll(&downloadFile, buffer, attemptContext.resumePartFilePath, &writeErrorMessage)) {
                 reply->abort();
                 return;
             }
 
-            downloadedBytes += buffer.size();
+            completedBytes += buffer.size();
             const qint64 currentUnits =
-                qMin(operation.progressUnits, calculateDownloadProgressUnits(downloadedBytes));
+                qMin(operation.progressUnits, calculateDownloadProgressUnits(completedBytes));
             if (progressCallback != nullptr && currentUnits > lastReportedUnits) {
-                progressCallback(currentUnits, describeOperation(operation));
+                progressCallback(currentUnits, buildDownloadProgressText(operation, completedBytes));
                 lastReportedUnits = currentUnits;
             }
         });
@@ -991,10 +1509,36 @@ private:
             if (statusCode >= 400) {
                 errorBody.append(tailBuffer);
             } else if (writeErrorMessage.isEmpty()) {
-                if (!writeAll(&targetFile, tailBuffer, operation.targetPath, &writeErrorMessage)) {
+                if (!responseInitialized) {
+                    responseInitialized = true;
+                    if (!validateDownloadReply(reply, operation, attemptContext, &writeErrorMessage)) {
+                        reply->abort();
+                    } else if (attemptContext.isResumeRequested && statusCode == 200) {
+                        if (logCallback != nullptr) {
+                            logCallback(QObject::tr("远端未返回分段内容，改为整包重下：%1")
+                                            .arg(displayRelativePath(operation.relativePath)));
+                        }
+                        if (!restartDownloadFromZero(operation,
+                                                     &attemptContext,
+                                                     &downloadFile,
+                                                     &writeErrorMessage)) {
+                            reply->abort();
+                        } else {
+                            completedBytes = 0;
+                            lastReportedUnits = 0;
+                        }
+                    }
+                }
+
+                if (!writeErrorMessage.isEmpty()) {
+                    reply->abort();
+                } else if (!writeAll(&downloadFile,
+                                     tailBuffer,
+                                     attemptContext.resumePartFilePath,
+                                     &writeErrorMessage)) {
                     reply->abort();
                 } else {
-                    downloadedBytes += tailBuffer.size();
+                    completedBytes += tailBuffer.size();
                 }
             }
         }
@@ -1004,43 +1548,26 @@ private:
         _worker->clearCurrentReply(reply);
         reply->deleteLater();
 
+        downloadFile.close();
+
         if (!writeErrorMessage.isEmpty()) {
             if (errorMessage != nullptr) {
                 *errorMessage = writeErrorMessage;
             }
-            targetFile.cancelWriting();
             return false;
         }
 
         if (!isSuccessful) {
-            targetFile.cancelWriting();
             return false;
         }
 
-        if (!targetFile.commit()) {
-            if (errorMessage != nullptr) {
-                *errorMessage = QObject::tr("提交下载文件失败，target=%1，error=%2")
-                                    .arg(operation.targetPath, targetFile.errorString());
-            }
+        if (!finalizeDownloadedFile(operation, attemptContext.resumePartFilePath, errorMessage)) {
             return false;
-        }
-
-        QFile targetMetadataFile(operation.targetPath);
-        if (targetMetadataFile.open(QIODevice::ReadWrite)) {
-            if (!targetMetadataFile.setFileTime(QDateTime::fromMSecsSinceEpoch(operation.modifiedTimeMs),
-                                                QFileDevice::FileModificationTime)) {
-                qWarning() << "Failed to update downloaded file timestamp. target=" << operation.targetPath
-                           << "mtimeMs=" << operation.modifiedTimeMs
-                           << "error=" << targetMetadataFile.errorString();
-            }
-        } else {
-            qWarning() << "Failed to open downloaded file for timestamp update. target="
-                       << operation.targetPath
-                       << "error=" << targetMetadataFile.errorString();
         }
 
         if (progressCallback != nullptr && operation.progressUnits > lastReportedUnits) {
-            progressCallback(operation.progressUnits, describeOperation(operation));
+            progressCallback(operation.progressUnits,
+                             buildDownloadProgressText(operation, operation.fileSize));
         }
         return true;
     }

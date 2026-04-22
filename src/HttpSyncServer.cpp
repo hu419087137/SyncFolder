@@ -2,12 +2,15 @@
 
 #include <QtHttpServer/qhttpserver.h>
 #include <QtHttpServer/qhttpserverrequest.h>
+#include <QtHttpServer/qhttpserverresponder.h>
 #include <QtHttpServer/qhttpserverresponse.h>
 
 #include <QDateTime>
 #include <QDir>
 #include <QDirIterator>
+#include <QFile>
 #include <QFileInfo>
+#include <QIODevice>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -16,6 +19,7 @@
 #include <QUrlQuery>
 
 #include <algorithm>
+#include <utility>
 
 namespace
 {
@@ -25,6 +29,126 @@ struct ManifestEntry
     bool isDirectory = false;
     qint64 fileSize = 0;
     qint64 modifiedTimeMs = 0;
+};
+
+struct ByteRange
+{
+    bool hasRange = false;
+    qint64 start = 0;
+    qint64 end = 0;
+};
+
+class FileRangeDevice : public QIODevice
+{
+public:
+    FileRangeDevice(const QString &filePath, qint64 offset, qint64 length, QObject *parent = nullptr)
+        : QIODevice(parent),
+          _file(filePath),
+          _offset(offset),
+          _length(length),
+          _position(0)
+    {
+    }
+
+    bool open(OpenMode mode) override
+    {
+        if ((mode & QIODevice::ReadOnly) == 0 || (mode & QIODevice::WriteOnly) != 0) {
+            setErrorString(QObject::tr("文件分段设备只支持只读模式。"));
+            return false;
+        }
+
+        if (!_file.open(QIODevice::ReadOnly)) {
+            setErrorString(_file.errorString());
+            return false;
+        }
+
+        if (!_file.seek(_offset)) {
+            setErrorString(_file.errorString());
+            _file.close();
+            return false;
+        }
+
+        _position = 0;
+        return QIODevice::open(mode);
+    }
+
+    void close() override
+    {
+        _file.close();
+        QIODevice::close();
+    }
+
+    qint64 size() const override
+    {
+        return _length;
+    }
+
+    qint64 pos() const override
+    {
+        return _position;
+    }
+
+    bool seek(qint64 pos) override
+    {
+        if (pos < 0 || pos > _length) {
+            return false;
+        }
+
+        if (!_file.seek(_offset + pos)) {
+            setErrorString(_file.errorString());
+            return false;
+        }
+
+        _position = pos;
+        return true;
+    }
+
+    bool atEnd() const override
+    {
+        return _position >= _length;
+    }
+
+    bool isSequential() const override
+    {
+        return false;
+    }
+
+protected:
+    qint64 readData(char *data, qint64 maxSize) override
+    {
+        if (maxSize <= 0) {
+            return 0;
+        }
+
+        const qint64 remainingBytes = _length - _position;
+        if (remainingBytes <= 0) {
+            return 0;
+        }
+
+        const qint64 bytesToRead = qMin(maxSize, remainingBytes);
+        const qint64 readBytes = _file.read(data, bytesToRead);
+        if (readBytes < 0) {
+            setErrorString(_file.errorString());
+            return -1;
+        }
+
+        _position += readBytes;
+        return readBytes;
+    }
+
+    qint64 writeData(const char *data, qint64 maxSize) override
+    {
+        Q_UNUSED(data)
+        Q_UNUSED(maxSize)
+        setErrorString(QObject::tr("文件分段设备不支持写入。"));
+        return -1;
+    }
+
+private:
+    QFile _file;
+    qint64 _offset = 0;
+    qint64 _length = 0;
+    qint64 _position = 0;
 };
 
 QString normalizeLocalPath(const QString &path)
@@ -117,6 +241,85 @@ QByteArray buildCompactErrorJson(const QString &errorMessage)
     const QJsonObject errorObject{{QStringLiteral("error"), errorMessage}};
     return QJsonDocument(errorObject).toJson(QJsonDocument::Compact);
 }
+
+QHttpServerResponder::StatusCode toResponderStatusCode(int statusCode)
+{
+    return static_cast<QHttpServerResponder::StatusCode>(statusCode);
+}
+
+void writeErrorResponse(QHttpServerResponder &&responder, int statusCode, const QString &errorMessage)
+{
+    responder.write(buildCompactErrorJson(errorMessage),
+                    {{QByteArrayLiteral("Content-Type"), QByteArrayLiteral("application/json; charset=utf-8")},
+                     {QByteArrayLiteral("Cache-Control"), QByteArrayLiteral("no-store")}},
+                    toResponderStatusCode(statusCode));
+}
+
+bool parseByteRange(const QByteArray &rangeHeader, qint64 fileSize, ByteRange *byteRange)
+{
+    if (byteRange == nullptr) {
+        return false;
+    }
+
+    *byteRange = ByteRange();
+    const QByteArray trimmedHeader = rangeHeader.trimmed();
+    if (trimmedHeader.isEmpty()) {
+        return true;
+    }
+
+    if (!trimmedHeader.startsWith(QByteArrayLiteral("bytes="))) {
+        return false;
+    }
+
+    const QByteArray rangeValue = trimmedHeader.mid(QByteArrayLiteral("bytes=").size()).trimmed();
+    if (rangeValue.contains(',')) {
+        return false;
+    }
+
+    const int dashIndex = rangeValue.indexOf('-');
+    if (dashIndex < 0) {
+        return false;
+    }
+
+    const QByteArray startText = rangeValue.left(dashIndex).trimmed();
+    const QByteArray endText = rangeValue.mid(dashIndex + 1).trimmed();
+    if (startText.isEmpty() && endText.isEmpty()) {
+        return false;
+    }
+
+    bool ok = false;
+    qint64 start = 0;
+    qint64 end = fileSize - 1;
+    if (startText.isEmpty()) {
+        const qint64 suffixLength = endText.toLongLong(&ok);
+        if (!ok || suffixLength <= 0) {
+            return false;
+        }
+
+        start = qMax<qint64>(0, fileSize - suffixLength);
+    } else {
+        start = startText.toLongLong(&ok);
+        if (!ok || start < 0) {
+            return false;
+        }
+
+        if (!endText.isEmpty()) {
+            end = endText.toLongLong(&ok);
+            if (!ok || end < 0) {
+                return false;
+            }
+        }
+    }
+
+    if (fileSize <= 0 || start >= fileSize || end < start) {
+        return false;
+    }
+
+    byteRange->hasRange = true;
+    byteRange->start = start;
+    byteRange->end = qMin(end, fileSize - 1);
+    return true;
+}
 } // namespace
 
 HttpSyncServer::HttpSyncServer(QObject *parent)
@@ -164,7 +367,9 @@ bool HttpSyncServer::startServer(const QString &rootPath,
         [this](const QHttpServerRequest &request) { return handleManifestRequest(request); });
     const bool fileRouteOk = _httpServer->route(
         QStringLiteral("/api/v1/file"),
-        [this](const QHttpServerRequest &request) { return handleFileRequest(request); });
+        [this](const QHttpServerRequest &request, QHttpServerResponder &&responder) {
+            handleFileRequest(request, std::move(responder));
+        });
     const bool pingRouteOk = _httpServer->route(QStringLiteral("/api/v1/ping"), [this]() {
         QJsonObject infoObject{
             {QStringLiteral("status"), QStringLiteral("ok")},
@@ -259,42 +464,89 @@ QHttpServerResponse HttpSyncServer::handleManifestRequest(const QHttpServerReque
     return response;
 }
 
-QHttpServerResponse HttpSyncServer::handleFileRequest(const QHttpServerRequest &request)
+void HttpSyncServer::handleFileRequest(const QHttpServerRequest &request, QHttpServerResponder &&responder)
 {
     if (!isAuthorized(request)) {
-        return buildErrorResponse(static_cast<int>(QHttpServerResponse::StatusCode::Unauthorized),
-                                  tr("访问令牌无效。"));
+        writeErrorResponse(std::move(responder),
+                           static_cast<int>(QHttpServerResponse::StatusCode::Unauthorized),
+                           tr("访问令牌无效。"));
+        return;
     }
 
     QString relativePath;
     if (!tryParseRelativeFilePath(request.query().queryItemValue(QStringLiteral("path")), &relativePath)) {
-        return buildErrorResponse(static_cast<int>(QHttpServerResponse::StatusCode::BadRequest),
-                                  tr("文件路径参数无效。"));
+        writeErrorResponse(std::move(responder),
+                           static_cast<int>(QHttpServerResponse::StatusCode::BadRequest),
+                           tr("文件路径参数无效。"));
+        return;
     }
 
     const QString absolutePath = QDir(_rootPath).absoluteFilePath(relativePath);
     if (!isSameOrChildPath(_rootPath, absolutePath)) {
-        return buildErrorResponse(static_cast<int>(QHttpServerResponse::StatusCode::Forbidden),
-                                  tr("禁止访问目录外的文件。"));
+        writeErrorResponse(std::move(responder),
+                           static_cast<int>(QHttpServerResponse::StatusCode::Forbidden),
+                           tr("禁止访问目录外的文件。"));
+        return;
     }
 
     const QFileInfo fileInfo(absolutePath);
     if (!fileInfo.exists() || !fileInfo.isFile()) {
-        return buildErrorResponse(static_cast<int>(QHttpServerResponse::StatusCode::NotFound),
-                                  tr("请求的文件不存在，path=%1").arg(relativePath));
+        writeErrorResponse(std::move(responder),
+                           static_cast<int>(QHttpServerResponse::StatusCode::NotFound),
+                           tr("请求的文件不存在，path=%1").arg(relativePath));
+        return;
     }
 
     if (fileInfo.isSymLink()) {
-        return buildErrorResponse(static_cast<int>(QHttpServerResponse::StatusCode::InternalServerError),
-                                  tr("检测到不支持的符号链接，path=%1").arg(relativePath));
+        writeErrorResponse(std::move(responder),
+                           static_cast<int>(QHttpServerResponse::StatusCode::InternalServerError),
+                           tr("检测到不支持的符号链接，path=%1").arg(relativePath));
+        return;
     }
 
-    QHttpServerResponse response = QHttpServerResponse::fromFile(absolutePath);
-    response.setHeader(QByteArrayLiteral("Cache-Control"), QByteArrayLiteral("no-store"));
-    response.setHeader(QByteArrayLiteral("X-Sync-Relative-Path"), relativePath.toUtf8());
-    response.setHeader(QByteArrayLiteral("X-Sync-MTime-Ms"),
-                       QByteArray::number(fileInfo.lastModified().toMSecsSinceEpoch()));
-    return response;
+    const qint64 fileSize = fileInfo.size();
+    const qint64 modifiedTimeMs = fileInfo.lastModified().toMSecsSinceEpoch();
+    ByteRange byteRange;
+    if (!parseByteRange(request.value(QByteArrayLiteral("Range")), fileSize, &byteRange)) {
+        responder.write(buildCompactErrorJson(tr("请求的 Range 头无效或超出文件范围。")),
+                        {{QByteArrayLiteral("Content-Type"), QByteArrayLiteral("application/json; charset=utf-8")},
+                         {QByteArrayLiteral("Cache-Control"), QByteArrayLiteral("no-store")},
+                         {QByteArrayLiteral("Accept-Ranges"), QByteArrayLiteral("bytes")},
+                         {QByteArrayLiteral("Content-Range"),
+                          QByteArrayLiteral("bytes */") + QByteArray::number(fileSize)}},
+                        QHttpServerResponder::StatusCode::RequestRangeNotSatisfiable);
+        return;
+    }
+
+    if (byteRange.hasRange) {
+        FileRangeDevice *rangeDevice = new FileRangeDevice(absolutePath,
+                                                           byteRange.start,
+                                                           byteRange.end - byteRange.start + 1);
+        const QByteArray contentRange = QByteArrayLiteral("bytes ")
+            + QByteArray::number(byteRange.start)
+            + QByteArrayLiteral("-")
+            + QByteArray::number(byteRange.end)
+            + QByteArrayLiteral("/")
+            + QByteArray::number(fileSize);
+        responder.write(rangeDevice,
+                        {{QByteArrayLiteral("Content-Type"), QByteArrayLiteral("application/octet-stream")},
+                         {QByteArrayLiteral("Cache-Control"), QByteArrayLiteral("no-store")},
+                         {QByteArrayLiteral("Accept-Ranges"), QByteArrayLiteral("bytes")},
+                         {QByteArrayLiteral("Content-Range"), contentRange},
+                         {QByteArrayLiteral("X-Sync-Relative-Path"), relativePath.toUtf8()},
+                         {QByteArrayLiteral("X-Sync-MTime-Ms"), QByteArray::number(modifiedTimeMs)}},
+                        QHttpServerResponder::StatusCode::PartialContent);
+        return;
+    }
+
+    FileRangeDevice *fileDevice = new FileRangeDevice(absolutePath, 0, fileSize);
+    responder.write(fileDevice,
+                    {{QByteArrayLiteral("Content-Type"), QByteArrayLiteral("application/octet-stream")},
+                     {QByteArrayLiteral("Cache-Control"), QByteArrayLiteral("no-store")},
+                     {QByteArrayLiteral("Accept-Ranges"), QByteArrayLiteral("bytes")},
+                     {QByteArrayLiteral("X-Sync-Relative-Path"), relativePath.toUtf8()},
+                     {QByteArrayLiteral("X-Sync-MTime-Ms"), QByteArray::number(modifiedTimeMs)}},
+                    QHttpServerResponder::StatusCode::Ok);
 }
 
 QHttpServerResponse HttpSyncServer::buildErrorResponse(int statusCode, const QString &errorMessage) const

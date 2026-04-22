@@ -4,6 +4,7 @@
 
 class QHttpServer;
 class QHttpServerRequest;
+class QHttpServerResponder;
 class QHttpServerResponse;
 
 /**
@@ -80,7 +81,7 @@ signals:
 
 private:
     QHttpServerResponse handleManifestRequest(const QHttpServerRequest &request);
-    QHttpServerResponse handleFileRequest(const QHttpServerRequest &request);
+    void handleFileRequest(const QHttpServerRequest &request, QHttpServerResponder &&responder);
     QHttpServerResponse buildErrorResponse(int statusCode, const QString &errorMessage) const;
     bool isAuthorized(const QHttpServerRequest &request) const;
     bool buildManifestJson(QByteArray *manifestJson, QString *errorMessage) const;
